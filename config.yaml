@@ -5,7 +5,7 @@ k: 10
 epsilon: 0.1
 beta: 0.5
 alpha: 0.5
-m: 8
+m: 4
 
 hidden_dim: 16
 model_name: "gcn" # gcn, gat, gin, gcn1, gcn2

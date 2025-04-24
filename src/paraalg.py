@@ -15,8 +15,14 @@ import time
 from tqdm import tqdm
 
 
+
+multiprocessing.set_start_method("fork", force=True)
+
+
 def run_algorithm_subset(args):
-    G, model, VT_subset, k, L, epsilon, beta, alpha, counter, lock = args
+    global G, model, k, L, epsilon, beta, alpha
+    # G, model, VT_subset, k, L, epsilon, beta, alpha, counter, lock = args
+    VT_subset, counter, lock = args
     # algorithm = ParaApxSXOP(G=G, model=model, VT=VT_subset, k=k, L=L, epsilon=epsilon)
     # algorithm = ParaApxSXI(G=G, model=model, VT=VT_subset, k=k, L=L, epsilon=epsilon)
     # algorithm = ParaDivSX(G=G, model=model, VT=VT_subset, k=k, L=L, epsilon=epsilon, beta=beta, alpha=alpha)
@@ -48,7 +54,7 @@ def monitor_progress(counters, total_nodes, interval=0.5):
         pbar.close()
 
 
-def preprocessing(G, model, VT, k, L, epsilon, beta, alpha, m):
+def preprocessing(VT, m):
     VT_subsets = np.array_split(VT, m)
     # print(f'VT_subsets:{VT_subsets}')
     nxG = to_networkx(G, to_undirected=True)
@@ -60,7 +66,8 @@ def preprocessing(G, model, VT, k, L, epsilon, beta, alpha, m):
     lock = manager.Lock()
 
     args = [
-        (G, model, subset, k, L, epsilon, beta, alpha, counters[idx], lock)
+        # (G, model, subset, k, L, epsilon, beta, alpha, counters[idx], lock)
+        (subset, counters[idx], lock)
         for idx, subset in enumerate(VT_subsets)
     ]
 
@@ -89,6 +96,9 @@ def compute_new_VT_subset(nxG, VT_subsets):
 
 def parallelize_algorithm(args, counters, total_nodes, m):
 
+    global G, model, k, L, epsilon, beta, alpha
+
+
     # Start monitoring process
     monitor_process = multiprocessing.Process(target=monitor_progress, args=(counters, total_nodes))
     monitor_process.start()
@@ -111,44 +121,76 @@ def parallelize_algorithm(args, counters, total_nodes, m):
 
 
 
+config = load_config("config.yaml")
+
+data_name = config['data_name']
+model_name = config['model_name']
+random_seed = config['random_seed']
+L = config['L']
+k = config['k']
+epsilon = config['epsilon']
+exp_name = config['exp_name']
+VT = config['VT']
+m = config['m']
+beta = config['beta']
+alpha = config['alpha']
+
+set_seed(random_seed)
+
+# Get input graph
+data = dataset_func(config)
+G=data
+
+# Get the VT
+VT = torch.tensor(VT)
+# VT = VT + 1000
+
+# Ready the model
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = get_model(config)
+model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device('cpu')))
+model.eval()
+model.to(device)
+
+
 def main():
 
     # print(multiprocessing.cpu_count())
 
-    config = load_config("config.yaml")
+    # config = load_config("config.yaml")
 
-    data_name = config['data_name']
-    model_name = config['model_name']
-    random_seed = config['random_seed']
-    L = config['L']
-    k = config['k']
-    epsilon = config['epsilon']
-    exp_name = config['exp_name']
-    VT = config['VT']
-    m = config['m']
-    beta = config['beta']
-    alpha = config['alpha']
+    # data_name = config['data_name']
+    # model_name = config['model_name']
+    # random_seed = config['random_seed']
+    # L = config['L']
+    # k = config['k']
+    # epsilon = config['epsilon']
+    # exp_name = config['exp_name']
+    # VT = config['VT']
+    # m = config['m']
+    # beta = config['beta']
+    # alpha = config['alpha']
 
-    set_seed(random_seed)
+    # set_seed(random_seed)
 
-    # Get input graph
-    data = dataset_func(config)
+    # # Get input graph
+    # data = dataset_func(config)
 
-    # Get the VT
-    VT = torch.tensor(VT)
-    # VT = VT + 1000
+    # # Get the VT
+    # VT = torch.tensor(VT)
+    # # VT = VT + 1000
 
-    # Ready the model
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = get_model(config)
-    model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device('cpu')))
-    model.eval()
-    model.to(device)
+    # # Ready the model
+    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # model = get_model(config)
+    # model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device('cpu')))
+    # model.eval()
+    # model.to(device)
 
     exp_name = 'para'
     if exp_name == 'para':
 
-        args, counters, total_nodes = preprocessing(G=data, model=model, VT=VT, k=k, L=L, epsilon=epsilon, beta=beta, alpha=alpha, m=m)
+        args, counters, total_nodes = preprocessing(VT=VT, m=m)
         results, ipf_results = parallelize_algorithm(args, counters, total_nodes, m=m)
 
         # print(results)

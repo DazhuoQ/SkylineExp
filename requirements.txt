@@ -2,7 +2,4 @@
 pytorch
 torch_geometric
 pyyaml
-matplotlib
-pandas
-scikit-learn
 metis

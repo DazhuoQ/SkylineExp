@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.utils import k_hop_subgraph
 
-from src.plot import plot_L_hop_subg
+# from src.plot import plot_L_hop_subg
 
 
 class ShareApxSXOP:

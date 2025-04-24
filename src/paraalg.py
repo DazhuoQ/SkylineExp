@@ -1,8 +1,8 @@
 from src.utils import *
 from src.model import get_model
 from src.apxalgop_para import ParaApxSXOP
-from src.apxalgi_para import ParaApxSXI
-from src.divalg_para import ParaDivSX
+# from src.apxalgi_para import ParaApxSXI
+# from src.divalg_para import ParaDivSX
 from src.apxalgop_share import ShareApxSXOP
 
 import multiprocessing

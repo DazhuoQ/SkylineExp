@@ -1,6 +1,7 @@
 #python==3.10
 pytorch
 torch_geometric
+pyyaml
 matplotlib
 pandas
 scikit-learn

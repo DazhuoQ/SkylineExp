@@ -1,5 +1,7 @@
-#python==3.10
-pytorch
-torch_geometric
+# python==3.10
+torch==2.3
+torch_geometric==2.6
 pyyaml
-metis
+scikit-learn
+scikit-learn-extra
+datasketch

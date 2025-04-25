@@ -55,11 +55,13 @@ def monitor_progress(counters, total_nodes, interval=0.5):
 
 
 def preprocessing(VT, m):
-    VT_subsets = np.array_split(VT, m)
-    # print(f'VT_subsets:{VT_subsets}')
-    nxG = to_networkx(G, to_undirected=True)
-    VT_subsets = compute_new_VT_subset(nxG, VT_subsets)
-    # print(f'VT_subsets:{VT_subsets}')
+    # VT_subsets = np.array_split(VT, m)
+    # # print(f'VT_subsets:{VT_subsets}')
+    # nxG = to_networkx(G, to_undirected=True)
+    # VT_subsets = compute_new_VT_subset(nxG, VT_subsets)
+    # # print(f'VT_subsets:{VT_subsets}')
+
+    VT_subsets = torch.load('./results/partition.pt')
 
     manager = multiprocessing.Manager()
     counters = [manager.Value('i', 0) for _ in range(m)]
@@ -142,6 +144,7 @@ data = dataset_func(config)
 G=data
 
 # Get the VT
+# VT = list(range(1000))
 VT = torch.tensor(VT)
 # VT = VT + 1000
 
@@ -154,38 +157,6 @@ model.to(device)
 
 
 def main():
-
-    # print(multiprocessing.cpu_count())
-
-    # config = load_config("config.yaml")
-
-    # data_name = config['data_name']
-    # model_name = config['model_name']
-    # random_seed = config['random_seed']
-    # L = config['L']
-    # k = config['k']
-    # epsilon = config['epsilon']
-    # exp_name = config['exp_name']
-    # VT = config['VT']
-    # m = config['m']
-    # beta = config['beta']
-    # alpha = config['alpha']
-
-    # set_seed(random_seed)
-
-    # # Get input graph
-    # data = dataset_func(config)
-
-    # # Get the VT
-    # VT = torch.tensor(VT)
-    # # VT = VT + 1000
-
-    # # Ready the model
-    # device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # model = get_model(config)
-    # model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device('cpu')))
-    # model.eval()
-    # model.to(device)
 
     exp_name = 'para'
     if exp_name == 'para':

@@ -12,10 +12,11 @@ Then install the needed packages:
 
 ## 2. Parallel Experiments
 
-Use:
+Use
 `python -m src.paraalg`
 to execute the parallel algorithm.
 
-The outputs look like this: 
+The outputs look like this: <img width="1134" alt="Screenshot 2025-04-25 at 15 16 28" src="https://github.com/user-attachments/assets/67f5e185-b81f-4b8b-9067-a606d51e26d1" />
+
 
 Modify `m` in `config.yaml` to run different settings. 

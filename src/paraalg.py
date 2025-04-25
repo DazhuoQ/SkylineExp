@@ -4,6 +4,7 @@ from src.apxalgop_para import ParaApxSXOP
 # from src.apxalgi_para import ParaApxSXI
 # from src.divalg_para import ParaDivSX
 from src.apxalgop_share import ShareApxSXOP
+from src.partalg import cluster_test_nodes
 
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
@@ -20,7 +21,7 @@ multiprocessing.set_start_method("fork", force=True)
 
 
 def run_algorithm_subset(args):
-    global G, model, k, L, epsilon, beta, alpha
+    global G, model, k, L, epsilon, beta, alpha, m
     # G, model, VT_subset, k, L, epsilon, beta, alpha, counter, lock = args
     VT_subset, counter, lock = args
     # algorithm = ParaApxSXOP(G=G, model=model, VT=VT_subset, k=k, L=L, epsilon=epsilon)
@@ -54,14 +55,10 @@ def monitor_progress(counters, total_nodes, interval=0.5):
         pbar.close()
 
 
-def preprocessing(VT, m):
-    # VT_subsets = np.array_split(VT, m)
-    # # print(f'VT_subsets:{VT_subsets}')
-    # nxG = to_networkx(G, to_undirected=True)
-    # VT_subsets = compute_new_VT_subset(nxG, VT_subsets)
-    # # print(f'VT_subsets:{VT_subsets}')
+def preprocessing():
 
-    VT_subsets = torch.load('./results/partition.pt')
+    VT = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
+    VT_subsets = cluster_test_nodes(VT, data.edge_index, l=L, m=m)
 
     manager = multiprocessing.Manager()
     counters = [manager.Value('i', 0) for _ in range(m)]
@@ -96,9 +93,9 @@ def compute_new_VT_subset(nxG, VT_subsets):
     return ranked_VT_subsets
 
 
-def parallelize_algorithm(args, counters, total_nodes, m):
+def parallelize_algorithm(args, counters, total_nodes):
 
-    global G, model, k, L, epsilon, beta, alpha
+    global G, model, k, L, epsilon, beta, alpha, m
 
 
     # Start monitoring process
@@ -161,11 +158,11 @@ def main():
     exp_name = 'para'
     if exp_name == 'para':
 
-        args, counters, total_nodes = preprocessing(VT=VT, m=m)
-        results, ipf_results = parallelize_algorithm(args, counters, total_nodes, m=m)
+        args, counters, total_nodes = preprocessing()
+        results, ipf_results = parallelize_algorithm(args, counters, total_nodes)
 
         # print(results)
-        print(np.mean(ipf_results))
+        print(f'IPF: {np.mean(ipf_results)}')
 
 if __name__ == "__main__":
     main()

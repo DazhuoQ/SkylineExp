@@ -10,4 +10,12 @@ First, create a virtual environment for the project:
 Then install the needed packages: 
 `pip install -r requirements.txt`
 
-## 2. 
+## 2. Parallel Experiments
+
+Use:
+`python -m src.paraalg`
+to execute the parallel algorithm.
+
+The outputs look like this: 
+
+Modify `m` in `config.yaml` to run different settings. 

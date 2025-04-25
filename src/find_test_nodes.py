@@ -106,6 +106,7 @@ def cluster_test_nodes_large(
 
 config = load_config("config.yaml")
 L = config['L']
+data_name = config['data_name']
 data_size = config['data_size']
 m = config['m']
 random_seed = config['random_seed']
@@ -128,5 +129,5 @@ VT_subsets = cluster_test_nodes_large(
 import itertools
 VT_subsets = list(itertools.chain(*VT_subsets))
 # VT_subsets = [torch.tensor(i) for i in VT_subsets]
-print(VT_subsets)
-torch.save(VT_subsets, './results/test_nodes.pt')
+# print(VT_subsets)
+torch.save(VT_subsets, './datasets/{}/test_nodes.pt'.format(data_name))

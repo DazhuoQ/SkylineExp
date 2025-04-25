@@ -2,7 +2,7 @@ import torch
 from torch_geometric.utils import k_hop_subgraph
 from typing import List, Dict
 import numpy as np
-from sklearn.metrics import pairwise_distances
+# from sklearn.metrics import pairwise_distances
 from sklearn_extra.cluster import KMedoids
 
 from src.utils import *
@@ -58,16 +58,16 @@ def cluster_test_nodes(test_nodes: List[int], edge_index: torch.Tensor, l: int, 
     return [torch.tensor([test_nodes[i] for i in cluster]) for cluster in balanced_clusters]
 
 
-config = load_config("config.yaml")
-L = config['L']
-# VT = config['VT']
-m = config['m']
-random_seed = config['random_seed']
-set_seed(random_seed)
-data = dataset_func(config)
+# config = load_config("config.yaml")
+# L = config['L']
+# # VT = config['VT']
+# m = config['m']
+# random_seed = config['random_seed']
+# set_seed(random_seed)
+# data = dataset_func(config)
 
-VT = torch.load('./results/test_nodes.pt')
+# VT = torch.load('./results/test_nodes.pt')
 
-clusters = cluster_test_nodes(VT, data.edge_index, l=L, m=m)
-print(clusters)
-torch.save(clusters, './results/partition.pt')
+# clusters = cluster_test_nodes(VT, data.edge_index, l=L, m=m)
+# print(clusters)
+# torch.save(clusters, './results/partition.pt')

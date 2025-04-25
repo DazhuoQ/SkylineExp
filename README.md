@@ -12,6 +12,8 @@ Then install the needed packages:
 
 ## 2. Parallel Experiments
 
+First, prepare the test nodes: `python -m src.find_test_nodes`.
+
 Use
 `python -m src.paraalg`
 to execute the parallel algorithm.

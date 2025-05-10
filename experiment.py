@@ -9,10 +9,10 @@ from torch_geometric.utils import k_hop_subgraph
 from src.utils import *
 from src.model import get_model
 from src.apxalgop import ApxSXOP
-from src.apxalgi import ApxSXI
-from src.divalg import DivSX
-from src.linearalg import LinearALG
-from src.individualalg import IndividualALG
+# from src.apxalgi import ApxSXI
+# from src.divalg import DivSX
+# from src.linearalg import LinearALG
+# from src.individualalg import IndividualALG
 
 
 def main(config_file, output_dir):
@@ -27,7 +27,7 @@ def main(config_file, output_dir):
     epsilon = config['epsilon']
     exp_name = config['exp_name']
     VT = config['VT']
-    vt = config['vt']
+    # vt = config['vt']
     
     # Save experiment settings
     print('Seed: '+str(config['random_seed']))
@@ -54,12 +54,18 @@ def main(config_file, output_dir):
 
     # experiments
     if exp_name == 'ksx':
+        VT = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
+        save_dir = './precomputed/{}'.format(data_name)
+        precomputed_data = load_precomputed(save_dir)
         algorithm = ApxSXOP(G = data, 
                           model = model, 
+                          data_name = data_name,
                           VT = VT, 
                           k = k, 
                           L = L,
-                          epsilon = epsilon)
+                          epsilon = epsilon,
+                          precomputed_data = precomputed_data
+                          )
         start_time = time.time()
         algorithm.generate_k_skylines()
         end_time = time.time()

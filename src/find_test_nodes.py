@@ -1,133 +1,197 @@
-import torch
-from torch_geometric.utils import k_hop_subgraph
-from datasketch import MinHash, MinHashLSH
-import random
-from typing import List, Set, Dict
-
 from src.utils import *
 
-# -----------------------------
-# Step 1: Extract l-hop neighborhood
-# -----------------------------
-def get_l_hop_neighbors(node_idx: int, l: int, edge_index: torch.Tensor) -> Set[int]:
-    subset, _, _, _ = k_hop_subgraph(
-        node_idx=node_idx,
-        num_hops=l,
-        edge_index=edge_index,
-        relabel_nodes=False
-    )
-    return set(subset.tolist()) - {node_idx}  # Exclude center node
-
-# -----------------------------
-# Step 2: Create MinHash from a neighborhood
-# -----------------------------
-def get_minhash(neighbors: Set[int], num_perm: int = 128) -> MinHash:
-    m = MinHash(num_perm=num_perm)
-    for n in neighbors:
-        m.update(str(n).encode('utf8'))
-    return m
-
-# -----------------------------
-# Step 3: Perform LSH to group similar nodes
-# -----------------------------
-def lsh_clustering(
-    test_nodes: List[int],
-    l: int,
-    edge_index: torch.Tensor,
-    threshold: float = 0.5,
-    num_perm: int = 128
-) -> List[List[int]]:
-    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
-    node_hashes: Dict[int, MinHash] = {}
-
-    print("Building MinHash and inserting into LSH index...")
-    for node in test_nodes:
-        neighbors = get_l_hop_neighbors(node, l, edge_index)
-        mh = get_minhash(neighbors, num_perm)
-        lsh.insert(str(node), mh)
-        node_hashes[node] = mh
-
-    print("Grouping nodes into buckets...")
-    buckets: Dict[str, List[int]] = {}
-    for node, mh in node_hashes.items():
-        key = tuple(sorted(lsh.query(mh)))
-        key_str = str(key)
-        if key_str not in buckets:
-            buckets[key_str] = []
-        buckets[key_str].append(node)
-
-    print(f"Number of clusters found: {len(buckets)}")
-    return list(buckets.values())
-
-# -----------------------------
-# Step 4: Select n nodes and split into m balanced clusters
-# -----------------------------
-def balanced_merge_lsh_clusters(
-    clusters: List[List[int]],
-    n: int,
-    m: int
-) -> List[List[int]]:
-    all_nodes = [node for cluster in clusters for node in cluster]
-    if n > len(all_nodes):
-        print(f"Warning: requested n={n} exceeds available {len(all_nodes)} nodes. Using all.")
-        n = len(all_nodes)
-
-    selected_nodes = random.sample(all_nodes, n)
-    random.shuffle(selected_nodes)
-
-    size = n // m
-    subsets = [selected_nodes[i * size:(i + 1) * size] for i in range(m)]
-
-    # Distribute leftovers
-    leftovers = selected_nodes[m * size:]
-    for i, node in enumerate(leftovers):
-        subsets[i % m].append(node)
-
-    print(f"Created {m} clusters with ~{n//m} nodes each (plus remainders).")
-    return subsets
-
-# -----------------------------
-# Final Wrapper
-# -----------------------------
-def cluster_test_nodes_large(
-    test_nodes: List[int],
-    edge_index: torch.Tensor,
-    l: int,
-    n: int,
-    m: int,
-    threshold: float = 0.5,
-    num_perm: int = 128
-) -> List[List[int]]:
-    print(f"Starting clustering on {len(test_nodes)} test nodes...")
-    lsh_clusters = lsh_clustering(test_nodes, l, edge_index, threshold=threshold, num_perm=num_perm)
-    return balanced_merge_lsh_clusters(lsh_clusters, n, m)
-
-
-
 config = load_config("config.yaml")
-L = config['L']
 data_name = config['data_name']
-data_size = config['data_size']
-m = config['m']
 random_seed = config['random_seed']
+L = config['L']
 set_seed(random_seed)
 data = dataset_func(config)
 
+import torch
+import networkx as nx
+from torch_geometric.utils import to_networkx, k_hop_subgraph
+import random
+from tqdm import tqdm
+from collections import deque
 
-test_nodes = list(range(data_size))
+def bfs_distances(G, nodes, max_hops):
+    distances = {node: {} for node in nodes}
+    for node in tqdm(nodes, desc="Precomputing BFS distances"):
+        visited = {node: 0}
+        queue = deque([node])
+        while queue:
+            u = queue.popleft()
+            if visited[u] >= max_hops:
+                continue
+            for v in G.neighbors(u):
+                if v not in visited:
+                    visited[v] = visited[u] + 1
+                    queue.append(v)
+        distances[node] = visited
+    return distances
 
-# Assume test_nodes is a list of node indices, and edge_index is from your PyG graph
-VT_subsets = cluster_test_nodes_large(
-    test_nodes=test_nodes,
-    edge_index=data.edge_index,
-    l=L,               # l-hop
-    n=1000,           # total nodes to sample
-    m=m,              # number of clusters
-    threshold=0.5,     # LSH Jaccard threshold
-    num_perm=128       # MinHash permutations
-)
-import itertools
-VT_subsets = list(itertools.chain(*VT_subsets))
-# VT_subsets = [torch.tensor(i) for i in VT_subsets]
-# print(VT_subsets)
-torch.save(VT_subsets, './datasets/{}/test_nodes.pt'.format(data_name))
+def select_seeds_high_degree_lhop_limit(G, bfs_dists, l_hop_sizes, m, min_hop_distance, max_lhop_size):
+    # Rank nodes by degree (high degree first)
+    node_degrees = dict(G.degree())
+    sorted_nodes = sorted(node_degrees, key=lambda x: -node_degrees[x])
+
+    seeds = []
+    for candidate in sorted_nodes:
+        if l_hop_sizes[candidate] > max_lhop_size:
+            continue  # Skip too big nodes
+        if all(bfs_dists[seed].get(candidate, 1e9) >= min_hop_distance for seed in seeds):
+            seeds.append(candidate)
+            if len(seeds) >= m:
+                break
+    return seeds
+
+
+def grow_group_exact_size_with_lhop_limit(G, seed, assigned, target_size, lhop_sizes, max_lhop_size):
+    group = [seed]
+    assigned.add(seed)
+    queue = deque([seed])
+    
+    while len(group) < target_size:
+        if not queue:
+            # If the queue is empty but group not full, select random unassigned node satisfying lhop constraint
+            unassigned = [n for n in G.nodes if n not in assigned and lhop_sizes.get(n, 1e9) <= max_lhop_size]
+            if not unassigned:
+                break  # No more eligible nodes
+            next_node = random.choice(unassigned)
+            queue.append(next_node)
+        
+        u = queue.popleft()
+        for v in G.neighbors(u):
+            if v not in assigned and lhop_sizes.get(v, 1e9) <= max_lhop_size:
+                group.append(v)
+                assigned.add(v)
+                queue.append(v)
+                if len(group) >= target_size:
+                    break
+    return group
+
+
+def compute_lhop_sizes(data, all_nodes, l):
+    edge_index = data.edge_index
+    lhop_sizes = {}
+    for node in tqdm(all_nodes, desc="Computing l-hop subgraph sizes"):
+        subset, _, _, _ = k_hop_subgraph(
+            node_idx=node,
+            num_hops=l,
+            edge_index=edge_index,
+            relabel_nodes=False
+        )
+        lhop_sizes[node] = len(subset)  # number of nodes including center
+    return lhop_sizes
+
+def cluster_by_bfs_exact(data, m=5, group_size=100, min_hop_distance=3, max_hops=5, l=2, max_lhop_size=200):
+    G_nx = to_networkx(data, to_undirected=True)
+    all_nodes = list(range(data.num_nodes))
+
+    # Precompute
+    bfs_dists = bfs_distances(G_nx, all_nodes, max_hops=max_hops)
+    lhop_sizes = compute_lhop_sizes(data, all_nodes, l=l)
+
+    seeds = select_seeds_high_degree_lhop_limit(
+        G_nx, bfs_dists, lhop_sizes,
+        m=m, min_hop_distance=min_hop_distance, max_lhop_size=max_lhop_size
+    )
+    if len(seeds) < m:
+        print(f"Warning: Only {len(seeds)} seeds could be selected with min_hop_distance={min_hop_distance}")
+    print(f"Selected seeds: {seeds}")
+
+    assigned = set()
+    groups = {}
+
+    # Step 2: Grow groups around seeds
+    assigned = set()
+    groups = {}
+    for seed in seeds:
+        groups[seed] = grow_group_exact_size_with_lhop_limit(
+            G_nx, seed, assigned,
+            target_size=group_size,
+            lhop_sizes=lhop_sizes,
+            max_lhop_size=max_lhop_size
+        )
+
+    return groups
+
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+
+def visualize_groups_with_seeds(data, groups, layout='spring', node_size=100, seed_node_size=300):
+    G_nx = to_networkx(data, to_undirected=True)
+    
+    # Only show selected nodes
+    selected_nodes = []
+    for group in groups.values():
+        selected_nodes.extend(group)
+    selected_nodes = set(selected_nodes)
+
+    subG = G_nx.subgraph(selected_nodes)
+
+    # Layout
+    if layout == 'spring':
+        pos = nx.spring_layout(subG, seed=42)
+    elif layout == 'kamada_kawai':
+        pos = nx.kamada_kawai_layout(subG)
+    elif layout == 'spectral':
+        pos = nx.spectral_layout(subG)
+    else:
+        raise ValueError(f"Unknown layout: {layout}")
+
+    # Assign colors
+    group_color_map = {}
+    colors = plt.cm.get_cmap('tab10', len(groups))
+
+    # Separate seeds and normal nodes
+    seed_nodes = []
+    normal_nodes = []
+    node_colors = []
+    for idx, (seed, nodes) in enumerate(groups.items()):
+        for node in nodes:
+            group_color_map[node] = colors(idx)
+            if node == seed:
+                seed_nodes.append(node)
+            else:
+                normal_nodes.append(node)
+
+    # Prepare node colors
+    normal_colors = [group_color_map[node] for node in normal_nodes]
+    seed_colors = [group_color_map[node] for node in seed_nodes]
+
+    # Draw
+    plt.figure(figsize=(9, 9))
+    nx.draw_networkx_edges(subG, pos, alpha=0.2)
+    nx.draw_networkx_nodes(subG, pos, nodelist=normal_nodes, node_color=normal_colors, node_size=node_size)
+    nx.draw_networkx_nodes(
+        subG, pos,
+        nodelist=seed_nodes,
+        node_color=seed_colors,
+        node_size=seed_node_size,
+        edgecolors='black',  # black outline
+        linewidths=1.5
+    )
+    plt.axis('off')
+    plt.title(f"Visualization of {len(groups)} groups (highlight seeds)", fontsize=14)
+    plt.show()
+
+
+m = 8
+group_size = 30
+
+
+groups = cluster_by_bfs_exact(data, m=m, group_size=group_size, min_hop_distance=10, l=L, max_lhop_size=200)
+
+nodes_selected = []
+for i, (seed, nodes) in enumerate(groups.items()):
+    clean_nodes = [int(i) for i in nodes]
+    nodes_selected.extend(clean_nodes)
+    # print(f"Group {i}: seed {seed}, {len(nodes)} nodes")
+# print(nodes_selected)
+
+# visualize_groups_with_seeds(data, groups, layout='spring', node_size=50, seed_node_size=300)
+
+torch.save(nodes_selected, './datasets/{}/test_nodes.pt'.format(data_name))

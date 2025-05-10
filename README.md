@@ -10,9 +10,15 @@ First, create a virtual environment for the project:
 Then install the needed packages: 
 `pip install -r requirements.txt`
 
-## 2. Parallel Experiments
+## 2. Skyline Explanation Experiments
 
-First, prepare the test nodes: `python -m src.find_test_nodes`.
+Train the GNN model `./train.sh config.yaml train_results/`
+
+Run this script: `./run.sh config.yaml results/`
+
+## 3. Parallel Experiments
+
+First, preprocess the dataset: `python -m src.find_test_nodes && python -m src.pre_edges && python -m src.partalg`.
 
 Use
 `python -m src.paraalg`

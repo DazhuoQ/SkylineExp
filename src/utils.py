@@ -8,6 +8,7 @@ from torch_geometric.datasets import Planetoid, FacebookPagePage, AmazonProducts
 # from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.datasets import ExplainerDataset
 from torch_geometric.datasets.graph_generator import BAGraph
+from torch_geometric.utils import remove_self_loops
 
 
 def set_seed(seed):
@@ -38,9 +39,10 @@ def dataset_func(config):
     os.makedirs(data_dir, exist_ok=True)
     set_seed(random_seed)
 
-    if data_name == "FacebookPage":
+    if data_name == "FacebookPagePage":
         dataset = FacebookPagePage(root="./datasets/FacebookPagePage")
         data = dataset[0]
+        data.edge_index, _ = remove_self_loops(data.edge_index)
         num_nodes = data.x.size(0)
 
         # Create new masks
@@ -65,7 +67,7 @@ def dataset_func(config):
         print(data)
         return data
 
-    if data_name == "AmazonComputers":
+    if data_name == "Computers":
         
         # Load the Amazon Computers dataset
         dataset = Amazon(root='./datasets/', name='computers')
@@ -123,13 +125,8 @@ def dataset_func(config):
         return data
 
     if data_name == "syn":
-        dataset = ExplainerDataset(
-            graph_generator=BAGraph(num_nodes=300, num_edges=5),
-            motif_generator='house',
-            num_motifs=80,
-            transform=T.Constant(),
-        )
-        data = dataset[0]
+
+        data = torch.load('./datasets/syn/syn.pt')
         num_nodes = data.x.size(0)
 
         # Create new masks
@@ -176,3 +173,11 @@ def get_save_path(dataset, apx_name):
 
     return method_path
 
+# Load all batches later
+def load_precomputed(save_dir='precomputed/'):
+    precomputed_data = {}
+    for fname in sorted(os.listdir(save_dir)):
+        if fname.endswith('.pt'):
+            batch_data = torch.load(os.path.join(save_dir, fname))
+            precomputed_data.update(batch_data)
+    return precomputed_data

@@ -6,6 +6,7 @@ import copy
 from tqdm.std import tqdm
 import random
 import time
+import os
 
 import torch
 import torch.nn.functional as F
@@ -16,13 +17,15 @@ from torch_geometric.utils import k_hop_subgraph
 
 class ShareApxSXOP:
     
-    def __init__(self, G, model, VT, k, L, epsilon):
+    def __init__(self, G, model, data_name, VT, k, L, epsilon, precomputed_data):
         self.G = G # original graph
         self.model = model  # gnn model
+        self.data_name = data_name  # gnn model
         self.k = k  # size of the skyline set
         self.VT = VT  # test nodes
         self.L = L  # num of gnn layers
         self.epsilon = epsilon
+        self.precomputed_data = precomputed_data
         self.k_sky_lst = []
 
         self.ipf_lst = []
@@ -32,58 +35,65 @@ class ShareApxSXOP:
         self.igd = np.inf
 
         self.ranked_indices_set = set()       # set of edge indices already ranked
-        self.ranked_list = []                 # list of (-score, edge_idx) sorted descending
         self.edge_idx_to_vector = {}          # fast lookup: edge_idx -> score_vector
+        self.overlap_cnt = 0
 
 
+    # def get_edge_sets_by_hop(self, vt):
+
+    #     L = self.L
+    #     edge_index = self.G.edge_index
+
+    #     node_idx, edge_index_sub, _, original_edge_mask = k_hop_subgraph(vt, L, edge_index, relabel_nodes=False)
+    #     ori_mask = original_edge_mask
+    #     selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+    #     subg_size = selected_edge_positions.size(0)
+        
+    #     hop_distances = {node.item(): float('inf') for node in node_idx}
+    #     hop_distances[vt] = 0
+    #     queue = deque([vt])
+        
+    #     while queue:
+    #         current_node = queue.popleft()
+    #         current_hop = hop_distances[current_node]
+            
+    #         for edge_idx in selected_edge_positions:
+    #             src, dst = edge_index[:, edge_idx]
+    #             if src.item() == current_node:
+    #                 if hop_distances[dst.item()] == float('inf'):
+    #                     hop_distances[dst.item()] = current_hop + 1
+    #                     queue.append(dst.item())
+    #             elif dst.item() == current_node:
+    #                 if hop_distances[src.item()] == float('inf'):
+    #                     hop_distances[src.item()] = current_hop + 1
+    #                     queue.append(src.item())
+        
+    #     edges_by_hop = defaultdict(list)
+    #     edge_masks_by_hop = {}
+    #     for edge_idx in selected_edge_positions:
+    #         src, dst = edge_index[:, edge_idx]
+    #         src_hop = hop_distances[src.item()]
+    #         dst_hop = hop_distances[dst.item()]
+            
+    #         edge_hop = min(src_hop, dst_hop) + 1
+    #         edges_by_hop[edge_hop].append(edge_idx.item())
+
+    #     for hop in range(1, L + 2):
+    #         mask = original_edge_mask.clone()
+    #         if hop in edges_by_hop:
+    #             for future_hop in range(hop + 1, L + 2):
+    #                 for edge_idx in edges_by_hop[future_hop]:
+    #                     mask[edge_idx] = False
+    #         edge_masks_by_hop[hop] = mask
+        
+    #     return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
     def get_edge_sets_by_hop(self, vt):
-
-        L = self.L
-        edge_index = self.G.edge_index
-
-        node_idx, edge_index_sub, _, original_edge_mask = k_hop_subgraph(vt, L, edge_index, relabel_nodes=False)
-        ori_mask = original_edge_mask
-        selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
-        subg_size = selected_edge_positions.size(0)
-        
-        hop_distances = {node.item(): float('inf') for node in node_idx}
-        hop_distances[vt] = 0
-        queue = deque([vt])
-        
-        while queue:
-            current_node = queue.popleft()
-            current_hop = hop_distances[current_node]
-            
-            for edge_idx in selected_edge_positions:
-                src, dst = edge_index[:, edge_idx]
-                if src.item() == current_node:
-                    if hop_distances[dst.item()] == float('inf'):
-                        hop_distances[dst.item()] = current_hop + 1
-                        queue.append(dst.item())
-                elif dst.item() == current_node:
-                    if hop_distances[src.item()] == float('inf'):
-                        hop_distances[src.item()] = current_hop + 1
-                        queue.append(src.item())
-        
-        edges_by_hop = defaultdict(list)
-        edge_masks_by_hop = {}
-        for edge_idx in selected_edge_positions:
-            src, dst = edge_index[:, edge_idx]
-            src_hop = hop_distances[src.item()]
-            dst_hop = hop_distances[dst.item()]
-            
-            edge_hop = min(src_hop, dst_hop) + 1
-            edges_by_hop[edge_hop].append(edge_idx.item())
-
-        for hop in range(1, L + 2):
-            mask = original_edge_mask.clone()
-            if hop in edges_by_hop:
-                for future_hop in range(hop + 1, L + 2):
-                    for edge_idx in edges_by_hop[future_hop]:
-                        mask[edge_idx] = False
-            edge_masks_by_hop[hop] = mask
-        
+        edges_by_hop = self.precomputed_data[vt]['edges_by_hop']
+        edge_masks_by_hop = self.precomputed_data[vt]['edge_masks_by_hop']
+        subg_size = self.precomputed_data[vt]['subg_size']
+        ori_mask = self.precomputed_data[vt]['ori_mask']
         return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+
 
 
     def compute_fidelity(self, node_idx, edge_mask, ori_mask):
@@ -155,7 +165,7 @@ class ShareApxSXOP:
     def generate_k_skylines(self, vt):
         DRG = defaultdict(list)
         k_sky = []
-        vt = vt.item()
+        # vt = vt.item()
         edges_by_hop, edge_masks_by_hop, subg_size, ori_mask = self.get_edge_sets_by_hop(vt)
         for hop in range(self.L, 0, -1):
             s_0 = edge_masks_by_hop[hop].clone()
@@ -176,6 +186,7 @@ class ShareApxSXOP:
 
                     idx = int(edge_pos)  # ensure it's a Python int
                     if idx in self.ranked_indices_set:
+                        self.overlap_cnt += 1
                         fplus, fminus = self.edge_idx_to_vector.get(idx, None)
                         t = (edge_pos, [fplus_0-fplus, fminus_0-fminus, -1/subg_size])
                         p_s = [1-fplus, 1-fminus, (math.log(edge_size)/math.log(subg_size))]  

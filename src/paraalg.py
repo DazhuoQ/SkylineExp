@@ -82,13 +82,13 @@ def preprocessing():
         VT_subsets = torch.load(f'./datasets/{data_name}/partition.pt').copy()
         nxG = to_networkx(G, to_undirected=True)
         VT_subsets = compute_new_VT_subset(nxG, VT_subsets)
-        visualize_node_groups(G, VT_subsets)
+        # visualize_node_groups(G, VT_subsets)
     else:
         VT = torch.load(f'./datasets/{data_name}/test_nodes.pt').copy()
         random.shuffle(VT)
         VT_subsets = np.array_split(VT, m)
         VT_subsets = [list(sub) for sub in VT_subsets]
-        visualize_node_groups(G, VT_subsets)
+        # visualize_node_groups(G, VT_subsets)
     return VT_subsets
 
 def parallelize_algorithm_shared(VT_subsets, method, G, model, data_name, k, L, epsilon, precomputed_data):
@@ -128,8 +128,8 @@ def main():
         VT_subsets, method, G, model, data_name, k, L, epsilon, precomputed_data
     )
     print(f'IPF: {np.mean(ipf_results):.4f}')
-    print(f'lookup_results: {lookup_results}, total: {np.sum(lookup_results)}')
-    print(f'overlap_results: {overlap_results}, total: {np.sum(overlap_results)}')
+    # print(f'lookup_results: {lookup_results}, total: {np.sum(lookup_results)}')
+    # print(f'overlap_results: {overlap_results}, total: {np.sum(overlap_results)}')
 
 if __name__ == "__main__":
     config = load_config("config.yaml")

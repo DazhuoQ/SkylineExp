@@ -24,7 +24,6 @@ Use
 `python -m src.paraalg`
 to execute the parallel algorithm.
 
-The outputs look like this: <img width="1134" alt="Screenshot 2025-04-25 at 15 16 28" src="https://github.com/user-attachments/assets/67f5e185-b81f-4b8b-9067-a606d51e26d1" />
-
+The outputs look like this: <img width="679" alt="Screenshot 2025-05-10 at 22 24 26" src="https://github.com/user-attachments/assets/e5286f68-1cd8-49b3-aca3-ecaa90f1513a" />
 
 Modify `m` in `config.yaml` to run different settings. 

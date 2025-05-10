@@ -1,5 +1,5 @@
 exp_name: ksx # ksx, div, insert, para, 3d
-method: share_para # simple_para, share_para, share_cluster_para
+method: share_cluster_para # simple_para, share_para, share_cluster_para
 random_seed: 42 # 715
 L: 2 # 1, 2, 3, 4
 k: 10

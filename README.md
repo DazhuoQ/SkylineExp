@@ -14,6 +14,8 @@ Then install the needed packages:
 
 Train the GNN model `./train.sh config.yaml train_results/`
 
+Pre-processing `python -m src.pre_edges`
+
 Run this script: `./run.sh config.yaml results/`
 
 ## 3. Parallel Experiments

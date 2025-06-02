@@ -46,24 +46,36 @@ class ApxSXOP:
 
         model = self.model
         data = self.G
-        original_edge_index = self.G.edge_index
+        # 获取模型的设备
+        device = next(model.parameters()).device
+        
+        # 确保所有数据在同一设备上
+        node_idx = node_idx.to(device) if isinstance(node_idx, torch.Tensor) else torch.tensor(node_idx, device=device)
+        edge_mask = edge_mask.to(device)
+        ori_mask = ori_mask.to(device)
+        
+        # 确保图数据在同一设备上
+        x = data.x.to(device)
+        original_edge_index = data.edge_index.to(device)
 
         with torch.no_grad():
-            y_original = F.softmax(model(data.x, original_edge_index[:, ori_mask]), dim=1)[node_idx]
+            y_original = F.softmax(model(x, original_edge_index[:, ori_mask]), dim=1)[node_idx]
             original_label = y_original.argmax()
             y_original = y_original[original_label]
 
         mask_edge_index = original_edge_index[:, edge_mask]
 
         with torch.no_grad():
-            y_subgraph = F.softmax(model(data.x, mask_edge_index), dim=1)[node_idx]
+            y_subgraph = F.softmax(model(x, mask_edge_index), dim=1)[node_idx]
             subgraph_label = y_subgraph.argmax()
             y_subgraph = y_subgraph[original_label]
 
+        # 确保互补边索引也在相同设备上
+        device = mask_edge_index.device
         complementary_edge_index = original_edge_index[:, ~edge_mask]
         
         with torch.no_grad():
-            y_complementary = F.softmax(model(data.x, complementary_edge_index), dim=1)[node_idx]
+            y_complementary = F.softmax(model(x, complementary_edge_index), dim=1)[node_idx]
             complementary_label = y_complementary.argmax()
             y_complementary = y_complementary[original_label]
 
@@ -109,7 +121,10 @@ class ApxSXOP:
 
 
     def generate_k_skylines(self):
+        # 获取模型设备
+        device = next(self.model.parameters()).device
         edge_index = self.G.edge_index
+        
         # for vt in self.VT:
         for vt in tqdm(self.VT, desc='num VT'):
             DRG = defaultdict(list)
@@ -133,11 +148,14 @@ class ApxSXOP:
                     edge_size = s_0.sum().item() - 1
                     if edge_size == 0:
                         break
-                    fplus_0, fminus_0, factual_0, counterfactual_0 = self.compute_fidelity(vt, s_0, ori_mask)
+                    # 确保vt是一个张量并在正确的设备上
+                    vt_tensor = vt if isinstance(vt, torch.Tensor) else torch.tensor(vt)
+                    vt_tensor = vt_tensor.to(device)
+                    fplus_0, fminus_0, factual_0, counterfactual_0 = self.compute_fidelity(vt_tensor, s_0, ori_mask)
                     for edge_pos in E_l: # iter E_l
                         s = s_0.clone()
                         s[edge_pos] = False
-                        fplus, fminus, factual, counterfactual = self.compute_fidelity(vt, s, ori_mask)
+                        fplus, fminus, factual, counterfactual = self.compute_fidelity(vt_tensor, s, ori_mask)
                         if not (factual or counterfactual):
                             continue
                         t = (edge_pos, [fplus_0-fplus, fminus_0-fminus, -1/subg_size])
@@ -163,13 +181,22 @@ class ApxSXOP:
 
 
     def IPF(self):
+        # 获取模型设备
+        device = next(self.model.parameters()).device
+        
         for vt, k_sky in self.k_sky_lst:
-            _, _, _, original_edge_mask = k_hop_subgraph(vt, self.L, self.G.edge_index, relabel_nodes=False)
+            # 确保vt是张量并在正确设备上
+            vt_tensor = vt if isinstance(vt, torch.Tensor) else torch.tensor(vt)
+            vt_tensor = vt_tensor.to(device)
+            
+            _, _, _, original_edge_mask = k_hop_subgraph(vt_tensor, self.L, self.G.edge_index, relabel_nodes=False)
+            original_edge_mask = original_edge_mask.to(device)
             selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
             subg_size = selected_edge_positions.size(0)
             score_lst = []
             for mask in k_sky:
-                fidelity_plus, fidelity_minus, _, _ = self.compute_fidelity(vt, mask, original_edge_mask)
+                mask = mask.to(device)
+                fidelity_plus, fidelity_minus, _, _ = self.compute_fidelity(vt_tensor, mask, original_edge_mask)
                 conc = 1 - (math.log(mask.sum().item()) / math.log(subg_size))
                 tmp = (fidelity_plus + fidelity_minus + conc)/3
                 score_lst.append(tmp)

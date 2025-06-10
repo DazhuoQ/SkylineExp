@@ -1,12 +1,5 @@
 from src.utils import *
-
-config = load_config("config.yaml")
-data_name = config['data_name']
-random_seed = config['random_seed']
-L = config['L']
-set_seed(random_seed)
-data = dataset_func(config)
-
+import os
 import torch
 import networkx as nx
 from torch_geometric.utils import to_networkx, k_hop_subgraph
@@ -14,6 +7,59 @@ import random
 from tqdm import tqdm
 from collections import deque
 
+config = load_config("config.yaml")
+data_name = config['data_name']
+random_seed = config['random_seed']
+L = config['L']
+m = config.get('m', 8)  # 获取配置中的m值，默认为8
+group_size = 30  # 每组节点数量
+set_seed(random_seed)
+data = dataset_func(config)
+
+# 为BAHouse创建目录
+os.makedirs(f'./datasets/{data_name}', exist_ok=True)
+
+# 针对BAHouse数据集的特殊处理
+if data_name == 'BAHouse':
+    print(f"检测到大型数据集BAHouse，使用随机采样方法...")
+    num_nodes = data.num_nodes
+    print(f"BAHouse数据集共有 {num_nodes} 个节点")
+    
+    # 保持与原代码相同的采样逻辑
+    target_samples = m * group_size  # 与原来逻辑一致，保持m组，每组group_size个节点
+    print(f"目标采样数量: {target_samples} 个节点 ({m} 组，每组 {group_size} 个节点)")
+    
+    # 随机采样节点
+    nodes_selected = random.sample(range(num_nodes), min(target_samples, num_nodes))
+    nodes_selected = sorted(nodes_selected)  # 排序以便更好地理解
+    
+    print(f"已随机选择 {len(nodes_selected)} 个测试节点")
+    
+    # 保存测试节点
+    torch.save(nodes_selected, f'./datasets/{data_name}/test_nodes.pt')
+    print(f"测试节点已保存到 ./datasets/{data_name}/test_nodes.pt")
+    
+    # 如果需要生成partition.pt文件
+    if config.get('method', '') == 'share_cluster_para':
+        print("创建简单分区文件...")
+        # 随机打乱节点顺序并分组
+        shuffled = nodes_selected.copy()
+        random.shuffle(shuffled)
+        partitions = []
+        nodes_per_partition = len(shuffled) // m
+        for i in range(m):
+            start_idx = i * nodes_per_partition
+            end_idx = start_idx + nodes_per_partition if i < m - 1 else len(shuffled)
+            partitions.append([int(n) for n in shuffled[start_idx:end_idx]])
+        
+        torch.save(partitions, f'./datasets/{data_name}/partition.pt')
+        print(f"分区文件已保存到 ./datasets/{data_name}/partition.pt")
+    
+    # 提前退出，不执行原来的代码
+    import sys
+    sys.exit(0)
+
+# 原有代码继续执行，用于非BAHouse数据集
 def bfs_distances(G, nodes, max_hops):
     distances = {node: {} for node in nodes}
     for node in tqdm(nodes, desc="Precomputing BFS distances"):

@@ -124,9 +124,9 @@ def dataset_func(config):
         print(data)
         return data
 
-    if data_name == "syn":
+    if data_name == "BAHouse":
 
-        data = torch.load('./datasets/syn/syn.pt')
+        data = torch.load('./datasets/BAHouse/BAHouse.pt')
         num_nodes = data.x.size(0)
 
         # Create new masks

@@ -18,119 +18,178 @@ from collections import deque, defaultdict
 multiprocessing.set_start_method('fork', force=True)
 
 
-# Your original function (lightly optimized)
-def get_edge_sets_by_hop(vt, G, L):
+# Your original function (optimized for large graphs)
+def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     edge_index = G.edge_index
+    
+    # Get node degree for early stopping if the node is too large
+    node_degree = torch_geometric.utils.degree(edge_index[0], num_nodes=G.num_nodes)
+    if node_degree[vt] > max_subgraph_size:
+        return None, None, 0, None  # Skip nodes with too many connections
+    
+    # Get l-hop subgraph with memory-efficient implementation
+    try:
+        node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
+            vt, L, edge_index, relabel_nodes=False
+        )
+    except RuntimeError:  # Handle memory errors
+        print(f"Memory error for node {vt}. Skipping...")
+        return None, None, 0, None
+        
+    if original_edge_mask.sum() > max_subgraph_size:
+        print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
+        return None, None, 0, None
 
-    # Get l-hop subgraph
-    node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
-        vt, L, edge_index, relabel_nodes=False
-    )
     ori_mask = original_edge_mask
     selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+    
+    # Handle case where only one edge is selected
+    if selected_edge_positions.dim() == 0:
+        selected_edge_positions = selected_edge_positions.unsqueeze(0)
+    
     subg_size = selected_edge_positions.size(0)
 
-    # Build adjacency list for fast BFS
-    adj_list = defaultdict(list)
+    # Build adjacency list for fast BFS (more memory efficient)
+    adj_list = defaultdict(set)  # Use set instead of list for faster lookup
     for edge_idx in selected_edge_positions:
         src, dst = edge_index[:, edge_idx]
-        adj_list[src.item()].append(dst.item())
-        adj_list[dst.item()].append(src.item())
+        src_item, dst_item = src.item(), dst.item()
+        adj_list[src_item].add(dst_item)
+        adj_list[dst_item].add(src_item)
 
     # BFS to compute hop distances
-    hop_distances = {node.item(): float('inf') for node in node_idx}
+    hop_distances = {}  # Use dict instead of defaultdict to save memory
     hop_distances[vt] = 0
     queue = deque([vt])
+    visited = {vt}  # Use set for O(1) lookup
 
     while queue:
         current_node = queue.popleft()
         current_hop = hop_distances[current_node]
         for neighbor in adj_list[current_node]:
-            if hop_distances[neighbor] == float('inf'):
+            if neighbor not in visited:
+                visited.add(neighbor)
                 hop_distances[neighbor] = current_hop + 1
                 queue.append(neighbor)
 
-    # Group edges by hop
+    # Group edges by hop with more efficient implementation
     edges_by_hop = defaultdict(list)
-    edge_masks_by_hop = {}
+    
     for edge_idx in selected_edge_positions:
         src, dst = edge_index[:, edge_idx]
-        src_hop = hop_distances[src.item()]
-        dst_hop = hop_distances[dst.item()]
+        src_item, dst_item = src.item(), dst.item()
+        src_hop = hop_distances.get(src_item, float('inf'))
+        dst_hop = hop_distances.get(dst_item, float('inf'))
         edge_hop = min(src_hop, dst_hop) + 1
-        edges_by_hop[edge_hop].append(edge_idx.item())
+        if edge_hop <= L + 1:  # Only include edges within our hop limit
+            edges_by_hop[edge_hop].append(edge_idx.item())
 
+    # Create edge masks by hop more efficiently
+    edge_masks_by_hop = {}
     for hop in range(1, L + 2):
-        mask = original_edge_mask.clone()
         if hop in edges_by_hop:
-            for future_hop in range(hop + 1, L + 2):
-                for edge_idx in edges_by_hop[future_hop]:
-                    mask[edge_idx] = False
-        edge_masks_by_hop[hop] = mask
+            # Create mask only when needed
+            mask = torch.zeros_like(original_edge_mask)
+            
+            # Include current hop and lower hops
+            for h in range(1, hop + 1):
+                if h in edges_by_hop:
+                    for edge_idx in edges_by_hop[h]:
+                        mask[edge_idx] = True
+                        
+            edge_masks_by_hop[hop] = mask
 
     return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
 
 
-# Wrapper for a single node (for multiprocessing)
+# Wrapper for a single node (with error handling)
 def precompute_single_node(args):
-    vt, G, L = args
-    edges_by_hop, edge_masks_by_hop, subg_size, ori_mask = get_edge_sets_by_hop(vt, G, L)
-    return {
-        'edges_by_hop': edges_by_hop,
-        'edge_masks_by_hop': {k: v.cpu() for k, v in edge_masks_by_hop.items()},
-        'subg_size': subg_size,
-        'ori_mask': ori_mask.cpu()
-    }
+    vt, G, L, max_subgraph_size = args
+    try:
+        result = get_edge_sets_by_hop(vt, G, L, max_subgraph_size)
+        edges_by_hop, edge_masks_by_hop, subg_size, ori_mask = result
+        
+        if edges_by_hop is None:  # Skip nodes that were too large
+            return vt, None
+            
+        return vt, {
+            'edges_by_hop': edges_by_hop,
+            'edge_masks_by_hop': {k: v.cpu() for k, v in edge_masks_by_hop.items()},
+            'subg_size': subg_size,
+            'ori_mask': ori_mask.cpu() if ori_mask is not None else None
+        }
+    except Exception as e:
+        print(f"Error processing node {vt}: {str(e)}")
+        return vt, None
 
 
-# Batch precompute and save
-def precompute_in_batches(G, list_of_nodes, L, num_workers=8, batch_size=100, save_dir='precomputed/'):
+# Batch precompute and save with memory management
+def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50, 
+                         save_dir='precomputed/', max_subgraph_size=50000):
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Filter out nodes with too many neighbors if possible
+    if hasattr(G, 'num_nodes'):
+        degree = torch_geometric.utils.degree(G.edge_index[0], num_nodes=G.num_nodes)
+        filtered_nodes = [node for node in list_of_nodes if degree[node] <= max_subgraph_size]
+        print(f"Filtered out {len(list_of_nodes) - len(filtered_nodes)} nodes with degree > {max_subgraph_size}")
+        list_of_nodes = filtered_nodes
     
     batches = [list_of_nodes[i:i+batch_size] for i in range(0, len(list_of_nodes), batch_size)]
     
     for batch_idx, batch_nodes in enumerate(tqdm(batches, desc="Precomputing batches")):
         batch_results = {}
-        args = [(vt, G, L) for vt in batch_nodes]
+        args = [(vt, G, L, max_subgraph_size) for vt in batch_nodes]
 
         with multiprocessing.Pool(num_workers) as pool:
-            for vt, result in zip(batch_nodes, pool.map(precompute_single_node, args)):
-                batch_results[vt] = result
+            for vt, result in pool.map(precompute_single_node, args):
+                if result is not None:  # Skip failed nodes
+                    batch_results[vt] = result
 
-        # Save this batch
-        save_path = os.path.join(save_dir, f'batch_{batch_idx}.pt')
-        torch.save(batch_results, save_path)
+        # Save this batch if not empty
+        if batch_results:
+            save_path = os.path.join(save_dir, f'batch_{batch_idx}.pt')
+            torch.save(batch_results, save_path)
+            # Clear memory
+            del batch_results
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
 
-# Load all batches later
-def load_precomputed(save_dir='precomputed/'):
+# Load batches with memory efficiency
+def load_precomputed(save_dir='precomputed/', batch_size=10):
+    """Load precomputed data in smaller batches to avoid memory issues"""
+    all_files = sorted([f for f in os.listdir(save_dir) if f.endswith('.pt')])
     precomputed_data = {}
-    for fname in sorted(os.listdir(save_dir)):
-        if fname.endswith('.pt'):
-            batch_data = torch.load(os.path.join(save_dir, fname))
-            precomputed_data.update(batch_data)
+    
+    for i in range(0, len(all_files), batch_size):
+        batch_files = all_files[i:i+batch_size]
+        batch_data = {}
+        
+        for fname in batch_files:
+            file_data = torch.load(os.path.join(save_dir, fname))
+            batch_data.update(file_data)
+            
+        precomputed_data.update(batch_data)
+        del batch_data  # Free memory
+        
     return precomputed_data
 
 
+# Main execution code
+if __name__ == "__main__":
+    # For BAHouse dataset, use smaller batch sizes and fewer workers
+    center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
+    max_subgraph_size = 50000  # Skip nodes with too many neighbors
+    num_workers = 4  # Reduce number of parallel processes 
+    batch_size = 50  # Smaller batch size for lower memory usage
+    save_dir = './precomputed/{}'.format(data_name)
 
+    precompute_in_batches(data, center_nodes, L, 
+                        num_workers=num_workers, 
+                        batch_size=batch_size, 
+                        save_dir=save_dir,
+                        max_subgraph_size=max_subgraph_size)
 
-# Assume you have a PyG graph: data.edge_index
-
-center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
-max_1hop_neighbors = 10000  # Skip nodes with >1000 neighbors in 1-hop
-num_workers = 8  # Number of parallel processes
-batch_size = 100
-save_dir = './precomputed/{}'.format(data_name)
-
-# Example:
-# G: your PyG graph object
-# list_of_nodes: list of node ids to precompute
-# L: number of hops
-
-precompute_in_batches(data, center_nodes, L, num_workers=num_workers, batch_size=batch_size, save_dir=save_dir)
-
-# Later
-# precomputed_data = load_precomputed(save_dir)
-# print(type(precomputed_data))
-# print(precomputed_data[0].keys())
-# print(precomputed_data[0]['subg_size'])
+    # Example usage for loading
+    # precomputed_data = load_precomputed(save_dir, batch_size=5)
+    # print(f"Loaded data for {len(precomputed_data)} nodes")

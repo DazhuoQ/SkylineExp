@@ -179,8 +179,8 @@ def load_precomputed(save_dir='precomputed/', batch_size=10):
 if __name__ == "__main__":
     # For BAHouse dataset, use smaller batch sizes and fewer workers
     center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
-    max_subgraph_size = 50000  # Skip nodes with too many neighbors
-    num_workers = 4  # Reduce number of parallel processes 
+    max_subgraph_size = 2000  # Skip nodes with too many neighbors
+    num_workers = 8  # Reduce number of parallel processes 
     batch_size = 50  # Smaller batch size for lower memory usage
     save_dir = './precomputed/{}'.format(data_name)
 

@@ -5,10 +5,11 @@ import yaml
 import torch
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid, FacebookPagePage, AmazonProducts, Amazon
-# from ogb.nodeproppred import PygNodePropPredDataset
+from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.datasets import ExplainerDataset
 from torch_geometric.datasets.graph_generator import BAGraph
 from torch_geometric.utils import remove_self_loops
+
 
 
 def set_seed(seed):

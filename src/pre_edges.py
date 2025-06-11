@@ -125,7 +125,7 @@ def precompute_single_node(args):
 
 # Batch precompute and save with memory management
 def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50, 
-                         save_dir='precomputed/', max_subgraph_size=50000):
+                         save_dir='precomputed/', max_subgraph_size=5000):
     os.makedirs(save_dir, exist_ok=True)
     
     # Filter out nodes with too many neighbors if possible

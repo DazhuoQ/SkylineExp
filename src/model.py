@@ -7,7 +7,7 @@ from torch_geometric.nn import GCNConv, GATConv, GINConv, SAGEConv
 from torch.nn import Sequential as Seq, Linear, ReLU, BatchNorm1d
 import torch.optim as optim
 
-from utils import *
+from src.utils import *
 
 class GCN(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):

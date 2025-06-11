@@ -59,7 +59,94 @@ if data_name == 'BAHouse':
     import sys
     sys.exit(0)
 
-# 原有代码继续执行，用于非BAHouse数据集
+# 针对arxiv数据集的高效处理
+elif data_name == 'arxiv':
+    print(f"检测到大型数据集arxiv，使用高效聚类方法...")
+    num_nodes = data.num_nodes
+    print(f"arxiv数据集共有 {num_nodes} 个节点")
+    
+    # 将图转换为NetworkX图以便处理
+    G_nx = to_networkx(data, to_undirected=True)
+    
+    # 1. 首先选择高度节点作为种子
+    # 计算度中心性（仅取样部分节点以提高效率）
+    sample_size = min(10000, num_nodes)  # 最多取样10000个节点计算度
+    sampled_nodes = random.sample(range(num_nodes), sample_size)
+    node_degrees = {node: G_nx.degree(node) for node in sampled_nodes}
+    
+    # 按度排序
+    sorted_nodes = sorted(node_degrees.keys(), key=lambda x: -node_degrees[x])
+    
+    # 2. 选择分散的种子节点
+    seeds = []
+    min_distance = 3  # 种子之间的最小距离
+    for candidate in sorted_nodes:
+        # 检查与现有种子的距离
+        too_close = False
+        for seed in seeds:
+            # 使用简单的最短路径计算
+            try:
+                path_length = nx.shortest_path_length(G_nx, source=seed, target=candidate)
+                if path_length < min_distance:
+                    too_close = True
+                    break
+            except nx.NetworkXNoPath:
+                # 如果节点之间没有路径，则认为它们足够远
+                pass
+        
+        if not too_close:
+            seeds.append(candidate)
+            if len(seeds) >= m:
+                break
+    
+    print(f"选择了 {len(seeds)} 个种子节点")
+    
+    # 3. 围绕每个种子生成组
+    nodes_selected = []
+    partitions = []
+    
+    for seed in seeds:
+        # 使用BFS从种子节点向外扩展
+        group = [seed]
+        visited = {seed}
+        queue = deque([seed])
+        
+        while len(group) < group_size and queue:
+            current = queue.popleft()
+            for neighbor in G_nx.neighbors(current):
+                if neighbor not in visited and len(group) < group_size:
+                    visited.add(neighbor)
+                    group.append(neighbor)
+                    queue.append(neighbor)
+        
+        # 如果通过BFS无法获得足够的节点，随机添加剩余节点
+        if len(group) < group_size:
+            remaining = group_size - len(group)
+            available = [n for n in range(num_nodes) if n not in visited]
+            if available:
+                additional = random.sample(available, min(remaining, len(available)))
+                group.extend(additional)
+        
+        group = [int(n) for n in group]  # 确保节点是整数
+        nodes_selected.extend(group)
+        partitions.append(group)
+    
+    print(f"共选择了 {len(nodes_selected)} 个节点")
+    
+    # 保存测试节点
+    torch.save(nodes_selected, f'./datasets/{data_name}/test_nodes.pt')
+    print(f"测试节点已保存到 ./datasets/{data_name}/test_nodes.pt")
+    
+    # 如果需要生成partition.pt文件
+    if config.get('method', '') == 'share_cluster_para':
+        torch.save(partitions, f'./datasets/{data_name}/partition.pt')
+        print(f"分区文件已保存到 ./datasets/{data_name}/partition.pt")
+    
+    # 提前退出，不执行原来的代码
+    import sys
+    sys.exit(0)
+
+# 原有代码继续执行，用于其他数据集
 def bfs_distances(G, nodes, max_hops):
     distances = {node: {} for node in nodes}
     for node in tqdm(nodes, desc="Precomputing BFS distances"):

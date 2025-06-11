@@ -175,3 +175,4 @@ cython_debug/
 .pypirc
 
 datasets/BAHouse
+datasets/ogbn_arxiv

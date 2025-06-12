@@ -48,9 +48,10 @@ def main(config_file, output_dir):
     # Ready the model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = get_model(config)
-    model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device('cpu')))
+    model.load_state_dict(torch.load('models/{}_{}_model.pth'.format(data_name, model_name), weights_only=False, map_location=torch.device(device)))
     model.eval()
     model.to(device)
+    data = data.to(device)
 
     # experiments
     if exp_name == 'ksx':

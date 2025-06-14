@@ -14,8 +14,45 @@ import multiprocessing
 from tqdm import tqdm
 from collections import deque, defaultdict
 
+# 添加cuGraph相关导入
+import numpy as np
+try:
+    import cudf
+    import cupy as cp
+    import cugraph
+    CUGRAPH_AVAILABLE = True
+except ImportError:
+    CUGRAPH_AVAILABLE = False
+    print("cuGraph not available. Falling back to CPU implementation.")
+
 # Set multiprocessing method early (important for MacOS/Linux)
 multiprocessing.set_start_method('fork', force=True)
+
+
+# 添加PyG图转换为cuGraph图的函数
+def pyg_to_cugraph(edge_index, num_nodes=None):
+    """Convert PyG graph to cuGraph graph for faster processing"""
+    if not CUGRAPH_AVAILABLE:
+        return None
+    
+    try:
+        # 创建cuDF DataFrame表示边
+        src = cudf.Series(edge_index[0].cpu().numpy())
+        dst = cudf.Series(edge_index[1].cpu().numpy())
+        
+        # 创建带权重的边DataFrame (使用1作为默认权重)
+        df = cudf.DataFrame()
+        df['src'] = src
+        df['dst'] = dst
+        df['weight'] = 1.0
+        
+        # 创建cuGraph图
+        G = cugraph.Graph()
+        G.from_cudf_edgelist(df, source='src', destination='dst', edge_attr='weight')
+        return G
+    except Exception as e:
+        print(f"Error converting to cuGraph: {e}")
+        return None
 
 
 # Your original function (optimized for large graphs)
@@ -27,7 +64,72 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     if node_degree[vt] > max_subgraph_size:
         return None, None, 0, None  # Skip nodes with too many connections
     
-    # Get l-hop subgraph with memory-efficient implementation
+    # 使用cuGraph进行加速计算 (如果可用)
+    if CUGRAPH_AVAILABLE:
+        try:
+            # 转换为cuGraph图
+            cug = pyg_to_cugraph(edge_index, num_nodes=G.num_nodes)
+            if cug is not None:
+                # 使用cuGraph的BFS获取k-hop信息
+                df = cugraph.traversal.bfs(cug, vt, depth_limit=L)
+                
+                # 从结果中获取节点和距离
+                nodes = df['vertex'].to_pandas().values
+                distances = df['distance'].to_pandas().values
+                
+                # 创建节点到距离的映射
+                hop_distances = {int(nodes[i]): int(distances[i]) for i in range(len(nodes))}
+                
+                # 为原始实现创建edge_mask
+                original_edge_mask = torch.zeros(edge_index.size(1), dtype=torch.bool)
+                
+                # 找出所有连接到我们k-hop子图的边
+                for i in range(edge_index.size(1)):
+                    src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+                    if src in hop_distances and dst in hop_distances:
+                        original_edge_mask[i] = True
+                
+                # 如果子图太大，跳过
+                if original_edge_mask.sum() > max_subgraph_size:
+                    print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
+                    return None, None, 0, None
+                
+                ori_mask = original_edge_mask
+                selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+                
+                # 处理只有一条边的情况
+                if selected_edge_positions.dim() == 0:
+                    selected_edge_positions = selected_edge_positions.unsqueeze(0)
+                
+                subg_size = selected_edge_positions.size(0)
+                
+                # 按照hop对边进行分组
+                edges_by_hop = defaultdict(list)
+                for edge_idx in selected_edge_positions:
+                    src, dst = edge_index[:, edge_idx]
+                    src_hop = hop_distances.get(src.item(), float('inf'))
+                    dst_hop = hop_distances.get(dst.item(), float('inf'))
+                    edge_hop = min(src_hop, dst_hop) + 1
+                    if edge_hop <= L + 1:
+                        edges_by_hop[edge_hop].append(edge_idx.item())
+                
+                # 创建按hop划分的边掩码
+                edge_masks_by_hop = {}
+                for hop in range(1, L + 2):
+                    if hop in edges_by_hop:
+                        mask = torch.zeros_like(original_edge_mask)
+                        for h in range(1, hop + 1):
+                            if h in edges_by_hop:
+                                for edge_idx in edges_by_hop[h]:
+                                    mask[edge_idx] = True
+                        edge_masks_by_hop[hop] = mask
+                
+                return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+        
+        except Exception as e:
+            print(f"cuGraph processing error for node {vt}: {e}. Falling back to CPU implementation.")
+    
+    # 如果cuGraph不可用或失败，使用原始实现
     try:
         node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
             vt, L, edge_index, relabel_nodes=False
@@ -175,8 +277,14 @@ def load_precomputed(save_dir='precomputed/', batch_size=10):
     return precomputed_data
 
 
-# Main execution code
+# 修改主执行代码，添加GPU检测
 if __name__ == "__main__":
+    # 检查GPU是否可用并打印状态信息
+    if CUGRAPH_AVAILABLE:
+        print("Using cuGraph acceleration on GPU")
+    else:
+        print("GPU acceleration not available, using CPU implementation")
+    
     # For BAHouse dataset, use smaller batch sizes and fewer workers
     center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
     max_subgraph_size = 30  # Skip nodes with too many neighbors

@@ -17,6 +17,10 @@ from collections import deque, defaultdict
 # Set multiprocessing method early (important for MacOS/Linux)
 multiprocessing.set_start_method('fork', force=True)
 
+# 创建进程间共享计数器和锁，用于节点级别进度报告
+node_counter = multiprocessing.Value('i', 0)
+counter_lock = multiprocessing.Lock()
+
 
 def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     edge_index = G.edge_index
@@ -112,13 +116,22 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
 
 # 改进的单节点预计算包装函数
 def precompute_single_node(args):
-    vt, G, L, max_subgraph_size = args
+    global node_counter, counter_lock
+    vt, G, L, max_subgraph_size, total_nodes = args
     try:
         result = get_edge_sets_by_hop(vt, G, L, max_subgraph_size)
         edges_by_hop, edge_masks_by_hop, subg_size, ori_mask = result
         
+        # 更新节点计数器并定期报告进度
+        with counter_lock:
+            node_counter.value += 1
+            current_count = node_counter.value
+            # 每处理100个节点或是最后一个节点时报告进度
+            if current_count % 100 == 0 or current_count == total_nodes:
+                print(f"已处理 {current_count}/{total_nodes} 个节点 ({current_count/total_nodes*100:.1f}%)")
+        
         if edges_by_hop is None:  # 跳过太大或处理失败的节点
-            print(f"Skipping node {vt} - processing failed or too large")
+            print(f"跳过节点 {vt} - 处理失败或子图过大")
             return vt, None
             
         return vt, {
@@ -128,7 +141,7 @@ def precompute_single_node(args):
             'ori_mask': ori_mask.cpu() if ori_mask is not None else None
         }
     except Exception as e:
-        print(f"Unexpected error processing node {vt}: {str(e)}")
+        print(f"处理节点 {vt} 时发生意外错误: {str(e)}")
         return vt, None
 
 
@@ -138,41 +151,50 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100,
     import time
     os.makedirs(save_dir, exist_ok=True)
     
+    # 重置节点计数器
+    global node_counter
+    with counter_lock:
+        node_counter.value = 0
+        
     # 记录失败的节点
     failed_nodes_file = os.path.join(save_dir, "failed_nodes.txt")
     failed_nodes = []
     
     # 过滤掉度数太大的节点 - 更快的过滤
-    print("Filtering nodes by degree...")
+    print("按度数过滤节点...")
     if hasattr(G, 'num_nodes'):
         degree = torch_geometric.utils.degree(G.edge_index[0], num_nodes=G.num_nodes)
         filtered_nodes = []
-        for node in tqdm(list_of_nodes, desc="Checking node degrees"):
+        for node in tqdm(list_of_nodes, desc="检查节点度数"):
             if node < len(degree) and degree[node] <= max_subgraph_size:
                 filtered_nodes.append(node)
             else:
                 failed_nodes.append(node)
         
-        print(f"Filtered out {len(list_of_nodes) - len(filtered_nodes)} nodes with degree > {max_subgraph_size}")
+        print(f"过滤掉 {len(list_of_nodes) - len(filtered_nodes)} 个度数 > {max_subgraph_size} 的节点")
         list_of_nodes = filtered_nodes
+    
+    # 计算总节点数用于进度报告
+    total_nodes = len(list_of_nodes)
+    print(f"开始处理 {total_nodes} 个节点...")
     
     # 创建更大的批次以减少开销
     batches = [list_of_nodes[i:i+batch_size] for i in range(0, len(list_of_nodes), batch_size)]
-    print(f"Processing {len(batches)} batches with {batch_size} nodes each")
+    print(f"处理 {len(batches)} 个批次，每批 {batch_size} 个节点")
     
     total_start_time = time.time()
     
-    for batch_idx, batch_nodes in enumerate(tqdm(batches, desc="Precomputing batches")):
+    for batch_idx, batch_nodes in enumerate(tqdm(batches, desc="预计算批次")):
         batch_start_time = time.time()
         batch_results = {}
-        args = [(vt, G, L, max_subgraph_size) for vt in batch_nodes]
+        args = [(vt, G, L, max_subgraph_size, total_nodes) for vt in batch_nodes]
         
         # 使用进程池处理批次
         with multiprocessing.Pool(num_workers) as pool:
             results = list(tqdm(
                 pool.imap(precompute_single_node, args),
                 total=len(args),
-                desc=f"Batch {batch_idx+1}/{len(batches)}",
+                desc=f"批次 {batch_idx+1}/{len(batches)}",
                 leave=False
             ))
             
@@ -188,9 +210,9 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100,
             try:
                 torch.save(batch_results, save_path)
                 batch_time = time.time() - batch_start_time
-                print(f"Saved batch {batch_idx} with {len(batch_results)} nodes in {batch_time:.2f}s")
+                print(f"保存批次 {batch_idx}，包含 {len(batch_results)} 个节点，耗时 {batch_time:.2f}秒")
             except Exception as e:
-                print(f"Error saving batch {batch_idx}: {str(e)}")
+                print(f"保存批次 {batch_idx} 时出错: {str(e)}")
                 # 记录整个批次的失败节点
                 failed_nodes.extend(batch_nodes)
         
@@ -204,15 +226,16 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100,
             with open(failed_nodes_file, 'w') as f:
                 for node in failed_nodes:
                     f.write(f"{node}\n")
-            print(f"Progress: {batch_idx+1}/{len(batches)} batches, time elapsed: {time.time()-total_start_time:.2f}s")
+            print(f"进度: {batch_idx+1}/{len(batches)} 批次, 已用时间: {time.time()-total_start_time:.2f}秒")
+            print(f"已处理 {node_counter.value}/{total_nodes} 个节点 ({node_counter.value/total_nodes*100:.1f}%)")
     
     # 最终保存失败的节点列表
     with open(failed_nodes_file, 'w') as f:
         for node in failed_nodes:
             f.write(f"{node}\n")
-    print(f"Saved list of {len(failed_nodes)} failed nodes to {failed_nodes_file}")
-    print(f"Total time: {time.time()-total_start_time:.2f}s")
-
+    print(f"已保存 {len(failed_nodes)} 个失败节点到 {failed_nodes_file}")
+    print(f"总时间: {time.time()-total_start_time:.2f}秒")
+    print(f"最终处理了 {node_counter.value}/{total_nodes} 个节点 ({node_counter.value/total_nodes*100:.1f}%)")
 
 # 增强的加载函数，支持容错
 def load_precomputed(save_dir='precomputed/', batch_size=10):

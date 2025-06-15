@@ -126,8 +126,8 @@ def precompute_single_node(args):
         with counter_lock:
             node_counter.value += 1
             current_count = node_counter.value
-            # 每处理100个节点或是最后一个节点时报告进度
-            if current_count % 100 == 0 or current_count == total_nodes:
+            # 每处理10个节点或是最后一个节点时报告进度
+            if current_count % 10 == 0 or current_count == total_nodes:
                 print(f"已处理 {current_count}/{total_nodes} 个节点 ({current_count/total_nodes*100:.1f}%)")
         
         if edges_by_hop is None:  # 跳过太大或处理失败的节点
@@ -281,7 +281,7 @@ if __name__ == "__main__":
     # 优化参数
     max_subgraph_size = 500  # 增加阈值以处理更多节点
     num_workers = max(4, os.cpu_count() // 2)  # 使用一半的CPU核心
-    batch_size = 200  # 更大的批次减少开销
+    batch_size = 50  # 减小批次大小以提高进度输出频率
     save_dir = './precomputed/{}'.format(data_name)
     
     print(f"Starting precomputation with parameters:")

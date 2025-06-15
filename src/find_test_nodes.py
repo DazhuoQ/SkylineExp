@@ -179,16 +179,28 @@ def visualize_groups_with_seeds(data, groups, layout='spring', node_size=100, se
     plt.show()
 
 
+def get_random_nodes(data, n):
+    perm = torch.randperm(data.num_nodes)
+    return perm[:n].tolist()  # Ensure list of ints
+
+
+
+
 m = 8
 group_size = 30
-
-
-groups = cluster_by_bfs_exact(data, m=m, group_size=group_size, min_hop_distance=10, l=L, max_lhop_size=200)
-
+random_flag = True
 nodes_selected = []
-for i, (seed, nodes) in enumerate(groups.items()):
-    clean_nodes = [int(i) for i in nodes]
-    nodes_selected.extend(clean_nodes)
+
+if random_flag == True:
+    nodes_selected = get_random_nodes(data, m*group_size)
+else:
+
+    groups = cluster_by_bfs_exact(data, m=m, group_size=group_size, min_hop_distance=10, l=L, max_lhop_size=200)
+
+
+    for i, (seed, nodes) in enumerate(groups.items()):
+        clean_nodes = [int(i) for i in nodes]
+        nodes_selected.extend(clean_nodes)
     # print(f"Group {i}: seed {seed}, {len(nodes)} nodes")
 # print(nodes_selected)
 

@@ -19,57 +19,86 @@ multiprocessing.set_start_method('fork', force=True)
 
 
 # Your original function (lightly optimized)
+# def get_edge_sets_by_hop(vt, G, L):
+#     edge_index = G.edge_index
+
+#     # Get l-hop subgraph
+#     node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
+#         vt, L, edge_index, relabel_nodes=False
+#     )
+#     ori_mask = original_edge_mask
+#     selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+#     subg_size = selected_edge_positions.size(0)
+
+#     # Build adjacency list for fast BFS
+#     adj_list = defaultdict(list)
+#     for edge_idx in selected_edge_positions:
+#         src, dst = edge_index[:, edge_idx]
+#         adj_list[src.item()].append(dst.item())
+#         adj_list[dst.item()].append(src.item())
+
+#     # BFS to compute hop distances
+#     hop_distances = {node.item(): float('inf') for node in node_idx}
+#     hop_distances[vt] = 0
+#     queue = deque([vt])
+
+#     while queue:
+#         current_node = queue.popleft()
+#         current_hop = hop_distances[current_node]
+#         for neighbor in adj_list[current_node]:
+#             if hop_distances[neighbor] == float('inf'):
+#                 hop_distances[neighbor] = current_hop + 1
+#                 queue.append(neighbor)
+
+#     # Group edges by hop
+#     edges_by_hop = defaultdict(list)
+#     edge_masks_by_hop = {}
+#     for edge_idx in selected_edge_positions:
+#         src, dst = edge_index[:, edge_idx]
+#         src_hop = hop_distances[src.item()]
+#         dst_hop = hop_distances[dst.item()]
+#         edge_hop = min(src_hop, dst_hop) + 1
+#         edges_by_hop[edge_hop].append(edge_idx.item())
+
+#     for hop in range(1, L + 2):
+#         mask = original_edge_mask.clone()
+#         if hop in edges_by_hop:
+#             for future_hop in range(hop + 1, L + 2):
+#                 for edge_idx in edges_by_hop[future_hop]:
+#                     mask[edge_idx] = False
+#         edge_masks_by_hop[hop] = mask
+
+#     return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+
 def get_edge_sets_by_hop(vt, G, L):
     edge_index = G.edge_index
+    total_edges = edge_index.size(1)
 
-    # Get l-hop subgraph
-    node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
-        vt, L, edge_index, relabel_nodes=False
-    )
-    ori_mask = original_edge_mask
-    selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
-    subg_size = selected_edge_positions.size(0)
-
-    # Build adjacency list for fast BFS
-    adj_list = defaultdict(list)
-    for edge_idx in selected_edge_positions:
-        src, dst = edge_index[:, edge_idx]
-        adj_list[src.item()].append(dst.item())
-        adj_list[dst.item()].append(src.item())
-
-    # BFS to compute hop distances
-    hop_distances = {node.item(): float('inf') for node in node_idx}
-    hop_distances[vt] = 0
-    queue = deque([vt])
-
-    while queue:
-        current_node = queue.popleft()
-        current_hop = hop_distances[current_node]
-        for neighbor in adj_list[current_node]:
-            if hop_distances[neighbor] == float('inf'):
-                hop_distances[neighbor] = current_hop + 1
-                queue.append(neighbor)
-
-    # Group edges by hop
-    edges_by_hop = defaultdict(list)
+    # Initialize edge mask for each hop level
     edge_masks_by_hop = {}
-    for edge_idx in selected_edge_positions:
-        src, dst = edge_index[:, edge_idx]
-        src_hop = hop_distances[src.item()]
-        dst_hop = hop_distances[dst.item()]
-        edge_hop = min(src_hop, dst_hop) + 1
-        edges_by_hop[edge_hop].append(edge_idx.item())
+    edges_by_hop = defaultdict(list)
+    visited_edges = torch.zeros(total_edges, dtype=torch.bool)
 
     for hop in range(1, L + 2):
-        mask = original_edge_mask.clone()
-        if hop in edges_by_hop:
-            for future_hop in range(hop + 1, L + 2):
-                for edge_idx in edges_by_hop[future_hop]:
-                    mask[edge_idx] = False
-        edge_masks_by_hop[hop] = mask
+        # Get hop-level subgraph
+        _, edge_index_hop, _, edge_mask_hop = torch_geometric.utils.k_hop_subgraph(
+            vt, L, edge_index, relabel_nodes=False
+        )
 
-    return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+        # Mask only edges that haven't been seen in previous hops
+        new_edge_mask = edge_mask_hop & (~visited_edges)
+        visited_edges |= new_edge_mask
 
+        edge_indices = torch.nonzero(new_edge_mask, as_tuple=False).squeeze().tolist()
+        if isinstance(edge_indices, int):  # special case: only one edge
+            edge_indices = [edge_indices]
+
+        # Store
+        edge_masks_by_hop[hop] = new_edge_mask.clone()
+        edges_by_hop[hop] = edge_indices
+
+    subg_size = visited_edges.sum().item()
+    return edges_by_hop, edge_masks_by_hop, subg_size, visited_edges
 
 # Wrapper for a single node (for multiprocessing)
 def precompute_single_node(args):

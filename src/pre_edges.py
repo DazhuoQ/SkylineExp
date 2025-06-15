@@ -14,48 +14,10 @@ import multiprocessing
 from tqdm import tqdm
 from collections import deque, defaultdict
 
-# 添加cuGraph相关导入
-import numpy as np
-try:
-    import cudf
-    import cupy as cp
-    import cugraph
-    CUGRAPH_AVAILABLE = True
-except ImportError:
-    CUGRAPH_AVAILABLE = False
-    print("cuGraph not available. Falling back to CPU implementation.")
-
 # Set multiprocessing method early (important for MacOS/Linux)
 multiprocessing.set_start_method('fork', force=True)
 
 
-# 添加PyG图转换为cuGraph图的函数
-def pyg_to_cugraph(edge_index, num_nodes=None):
-    """Convert PyG graph to cuGraph graph for faster processing"""
-    if not CUGRAPH_AVAILABLE:
-        return None
-    
-    try:
-        # 创建cuDF DataFrame表示边
-        src = cudf.Series(edge_index[0].cpu().numpy())
-        dst = cudf.Series(edge_index[1].cpu().numpy())
-        
-        # 创建带权重的边DataFrame (使用1作为默认权重)
-        df = cudf.DataFrame()
-        df['src'] = src
-        df['dst'] = dst
-        df['weight'] = 1.0
-        
-        # 创建cuGraph图
-        G = cugraph.Graph()
-        G.from_cudf_edgelist(df, source='src', destination='dst', edge_attr='weight')
-        return G
-    except Exception as e:
-        print(f"Error converting to cuGraph: {e}")
-        return None
-
-
-# Your original function (optimized for large graphs)
 def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     edge_index = G.edge_index
     
@@ -64,10 +26,10 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     if node_degree[vt] > max_subgraph_size:
         return None, None, 0, None  # Skip nodes with too many connections
     
-    # 优化的PyG实现
+    # 使用纯PyG实现，移除复杂的cuGraph逻辑以提高稳定性
     try:
-        # 使用PyG的k_hop_subgraph方法，但添加错误处理和优化
-        node_idx, edge_index_sub, mapping, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
+        # 使用PyG的k_hop_subgraph方法获取子图
+        node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
             vt, L, edge_index, relabel_nodes=False, num_nodes=G.num_nodes
         )
         
@@ -85,49 +47,43 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
         
         subg_size = selected_edge_positions.size(0)
         
-        # 使用PyG的稀疏邻接矩阵来优化BFS
-        # 创建稀疏邻接矩阵
-        edge_index_masked = edge_index[:, original_edge_mask]
+        # 构建邻接表用于快速BFS
+        adj_list = defaultdict(set)
+        for edge_idx in selected_edge_positions:
+            src, dst = edge_index[:, edge_idx]
+            src_item, dst_item = src.item(), dst.item()
+            adj_list[src_item].add(dst_item)
+            adj_list[dst_item].add(src_item)
         
-        # 计算每个节点的hop距离 - 优化的BFS实现
+        # 使用BFS计算hop距离
         hop_distances = {}
         hop_distances[vt] = 0
+        queue = deque([vt])
         visited = {vt}
-        current_frontier = {vt}
         
-        for hop in range(1, L + 1):
-            if not current_frontier:
-                break
-                
-            next_frontier = set()
-            # 为当前边界中的每个节点找到所有邻居
-            for node in current_frontier:
-                # 找出所有以当前节点为源的边
-                neighbors = edge_index_masked[1][edge_index_masked[0] == node].tolist()
-                # 找出所有以当前节点为目标的边
-                neighbors.extend(edge_index_masked[0][edge_index_masked[1] == node].tolist())
-                
-                for neighbor in neighbors:
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        hop_distances[neighbor] = hop
-                        next_frontier.add(neighbor)
+        while queue:
+            current_node = queue.popleft()
+            current_hop = hop_distances[current_node]
             
-            current_frontier = next_frontier
+            for neighbor in adj_list[current_node]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    hop_distances[neighbor] = current_hop + 1
+                    if current_hop + 1 < L:  # 只在需要时继续BFS
+                        queue.append(neighbor)
         
-        # 高效地按hop对边进行分组 - 使用张量操作而不是循环
+        # 按hop对边进行分组
         edges_by_hop = defaultdict(list)
-        
         for edge_idx in selected_edge_positions:
             src, dst = edge_index[:, edge_idx]
             src_item, dst_item = src.item(), dst.item()
             src_hop = hop_distances.get(src_item, float('inf'))
             dst_hop = hop_distances.get(dst_item, float('inf'))
             edge_hop = min(src_hop, dst_hop) + 1
-            if edge_hop <= L + 1:  # 只包含我们hop限制内的边
+            if edge_hop <= L + 1:
                 edges_by_hop[edge_hop].append(edge_idx.item())
         
-        # 批量创建边掩码 - 减少内存分配
+        # 创建边掩码
         edge_masks_by_hop = {}
         cumulative_edges = []
         for hop in range(1, L + 2):
@@ -139,158 +95,20 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
         
         return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
     
-    except RuntimeError as e:  # 处理内存错误
-        print(f"PyG processing error for node {vt}: {e}. Skipping...")
-        return None, None, 0, None
-    
-    # 如果cuGraph可用且PyG失败，尝试使用cuGraph
-    if CUGRAPH_AVAILABLE:
-        try:
-            # 转换为cuGraph图
-            cug = pyg_to_cugraph(edge_index, num_nodes=G.num_nodes)
-            if cug is not None:
-                # 使用cuGraph的BFS获取k-hop信息
-                df = cugraph.traversal.bfs(cug, vt, depth_limit=L)
-                
-                # 从结果中获取节点和距离
-                nodes = df['vertex'].to_pandas().values
-                distances = df['distance'].to_pandas().values
-                
-                # 创建节点到距离的映射
-                hop_distances = {int(nodes[i]): int(distances[i]) for i in range(len(nodes))}
-                
-                # 为原始实现创建edge_mask
-                original_edge_mask = torch.zeros(edge_index.size(1), dtype=torch.bool)
-                
-                # 找出所有连接到我们k-hop子图的边
-                for i in range(edge_index.size(1)):
-                    src, dst = edge_index[0, i].item(), edge_index[1, i].item()
-                    if src in hop_distances and dst in hop_distances:
-                        original_edge_mask[i] = True
-                
-                # 如果子图太大，跳过
-                if original_edge_mask.sum() > max_subgraph_size:
-                    print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
-                    return None, None, 0, None
-                
-                ori_mask = original_edge_mask
-                selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
-                
-                # 处理只有一条边的情况
-                if selected_edge_positions.dim() == 0:
-                    selected_edge_positions = selected_edge_positions.unsqueeze(0)
-                
-                subg_size = selected_edge_positions.size(0)
-                
-                # 按照hop对边进行分组
-                edges_by_hop = defaultdict(list)
-                for edge_idx in selected_edge_positions:
-                    src, dst = edge_index[:, edge_idx]
-                    src_hop = hop_distances.get(src.item(), float('inf'))
-                    dst_hop = hop_distances.get(dst.item(), float('inf'))
-                    edge_hop = min(src_hop, dst_hop) + 1
-                    if edge_hop <= L + 1:
-                        edges_by_hop[edge_hop].append(edge_idx.item())
-                
-                # 创建按hop划分的边掩码
-                edge_masks_by_hop = {}
-                for hop in range(1, L + 2):
-                    if hop in edges_by_hop:
-                        mask = torch.zeros_like(original_edge_mask)
-                        for h in range(1, hop + 1):
-                            if h in edges_by_hop:
-                                for edge_idx in edges_by_hop[h]:
-                                    mask[edge_idx] = True
-                        edge_masks_by_hop[hop] = mask
-                
-                return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
-        
-        except Exception as e:
-            print(f"cuGraph processing error for node {vt}: {e}. Falling back to CPU implementation.")
-    
-    # 如果上面的方法都失败，使用原始CPU实现
-    try:
-        node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
-            vt, L, edge_index, relabel_nodes=False
-        )
-    except RuntimeError:  # Handle memory errors
-        print(f"Memory error for node {vt}. Skipping...")
-        return None, None, 0, None
-        
-    if original_edge_mask.sum() > max_subgraph_size:
-        print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
+    except Exception as e:
+        print(f"Error processing node {vt}: {str(e)}")
         return None, None, 0, None
 
-    ori_mask = original_edge_mask
-    selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
-    
-    # Handle case where only one edge is selected
-    if selected_edge_positions.dim() == 0:
-        selected_edge_positions = selected_edge_positions.unsqueeze(0)
-    
-    subg_size = selected_edge_positions.size(0)
 
-    # Build adjacency list for fast BFS (more memory efficient)
-    adj_list = defaultdict(set)  # Use set instead of list for faster lookup
-    for edge_idx in selected_edge_positions:
-        src, dst = edge_index[:, edge_idx]
-        src_item, dst_item = src.item(), dst.item()
-        adj_list[src_item].add(dst_item)
-        adj_list[dst_item].add(src_item)
-
-    # BFS to compute hop distances
-    hop_distances = {}  # Use dict instead of defaultdict to save memory
-    hop_distances[vt] = 0
-    queue = deque([vt])
-    visited = {vt}  # Use set for O(1) lookup
-
-    while queue:
-        current_node = queue.popleft()
-        current_hop = hop_distances[current_node]
-        for neighbor in adj_list[current_node]:
-            if neighbor not in visited:
-                visited.add(neighbor)
-                hop_distances[neighbor] = current_hop + 1
-                queue.append(neighbor)
-
-    # Group edges by hop with more efficient implementation
-    edges_by_hop = defaultdict(list)
-    
-    for edge_idx in selected_edge_positions:
-        src, dst = edge_index[:, edge_idx]
-        src_item, dst_item = src.item(), dst.item()
-        src_hop = hop_distances.get(src_item, float('inf'))
-        dst_hop = hop_distances.get(dst_item, float('inf'))
-        edge_hop = min(src_hop, dst_hop) + 1
-        if edge_hop <= L + 1:  # Only include edges within our hop limit
-            edges_by_hop[edge_hop].append(edge_idx.item())
-
-    # Create edge masks by hop more efficiently
-    edge_masks_by_hop = {}
-    for hop in range(1, L + 2):
-        if hop in edges_by_hop:
-            # Create mask only when needed
-            mask = torch.zeros_like(original_edge_mask)
-            
-            # Include current hop and lower hops
-            for h in range(1, hop + 1):
-                if h in edges_by_hop:
-                    for edge_idx in edges_by_hop[h]:
-                        mask[edge_idx] = True
-                        
-            edge_masks_by_hop[hop] = mask
-
-    return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
-
-
-# Wrapper for a single node (with error handling)
+# 改进的单节点预计算包装函数
 def precompute_single_node(args):
     vt, G, L, max_subgraph_size = args
     try:
         result = get_edge_sets_by_hop(vt, G, L, max_subgraph_size)
         edges_by_hop, edge_masks_by_hop, subg_size, ori_mask = result
         
-        if edges_by_hop is None:  # Skip nodes that were too large
+        if edges_by_hop is None:  # 跳过太大或处理失败的节点
+            print(f"Skipping node {vt} - processing failed or too large")
             return vt, None
             
         return vt, {
@@ -300,19 +118,25 @@ def precompute_single_node(args):
             'ori_mask': ori_mask.cpu() if ori_mask is not None else None
         }
     except Exception as e:
-        print(f"Error processing node {vt}: {str(e)}")
+        print(f"Unexpected error processing node {vt}: {str(e)}")
         return vt, None
 
 
-# Batch precompute and save with memory management
+# 改进的批量预计算和保存函数
 def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50, 
                          save_dir='precomputed/', max_subgraph_size=5000):
     os.makedirs(save_dir, exist_ok=True)
     
-    # Filter out nodes with too many neighbors if possible
+    # 记录失败的节点
+    failed_nodes_file = os.path.join(save_dir, "failed_nodes.txt")
+    failed_nodes = []
+    
+    # 过滤掉度数太大的节点
     if hasattr(G, 'num_nodes'):
         degree = torch_geometric.utils.degree(G.edge_index[0], num_nodes=G.num_nodes)
         filtered_nodes = [node for node in list_of_nodes if degree[node] <= max_subgraph_size]
+        skipped_nodes = set(list_of_nodes) - set(filtered_nodes)
+        failed_nodes.extend(skipped_nodes)
         print(f"Filtered out {len(list_of_nodes) - len(filtered_nodes)} nodes with degree > {max_subgraph_size}")
         list_of_nodes = filtered_nodes
     
@@ -321,54 +145,78 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50,
     for batch_idx, batch_nodes in enumerate(tqdm(batches, desc="Precomputing batches")):
         batch_results = {}
         args = [(vt, G, L, max_subgraph_size) for vt in batch_nodes]
-
+        
+        # 使用进程池处理批次
         with multiprocessing.Pool(num_workers) as pool:
             for vt, result in pool.map(precompute_single_node, args):
-                if result is not None:  # Skip failed nodes
+                if result is not None:  # 跳过失败的节点
                     batch_results[vt] = result
-
-        # Save this batch if not empty
+                else:
+                    failed_nodes.append(vt)
+        
+        # 保存这个批次（如果不为空）
         if batch_results:
             save_path = os.path.join(save_dir, f'batch_{batch_idx}.pt')
-            torch.save(batch_results, save_path)
-            # Clear memory
-            del batch_results
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            try:
+                torch.save(batch_results, save_path)
+                print(f"Saved batch {batch_idx} with {len(batch_results)} nodes")
+            except Exception as e:
+                print(f"Error saving batch {batch_idx}: {str(e)}")
+                # 记录整个批次的失败节点
+                failed_nodes.extend(batch_nodes)
+        
+        # 清理内存
+        del batch_results
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # 保存失败的节点列表
+    with open(failed_nodes_file, 'w') as f:
+        for node in failed_nodes:
+            f.write(f"{node}\n")
+    print(f"Saved list of {len(failed_nodes)} failed nodes to {failed_nodes_file}")
 
 
-# Load batches with memory efficiency
+# 增强的加载函数，支持容错
 def load_precomputed(save_dir='precomputed/', batch_size=10):
-    """Load precomputed data in smaller batches to avoid memory issues"""
+    """加载预计算数据，带错误处理和日志"""
     all_files = sorted([f for f in os.listdir(save_dir) if f.endswith('.pt')])
     precomputed_data = {}
+    failed_files = []
+    
+    print(f"Loading {len(all_files)} batch files from {save_dir}")
     
     for i in range(0, len(all_files), batch_size):
         batch_files = all_files[i:i+batch_size]
-        batch_data = {}
         
         for fname in batch_files:
-            file_data = torch.load(os.path.join(save_dir, fname))
-            batch_data.update(file_data)
-            
-        precomputed_data.update(batch_data)
-        del batch_data  # Free memory
+            try:
+                file_path = os.path.join(save_dir, fname)
+                file_data = torch.load(file_path)
+                precomputed_data.update(file_data)
+            except Exception as e:
+                print(f"Error loading file {fname}: {str(e)}")
+                failed_files.append(fname)
         
+        # 周期性报告进度
+        if (i//batch_size) % 10 == 0:
+            print(f"Loaded {i//batch_size} batches, current data size: {len(precomputed_data)} nodes")
+    
+    if failed_files:
+        print(f"Warning: Failed to load {len(failed_files)} files: {failed_files[:5]}...")
+    
+    print(f"Successfully loaded data for {len(precomputed_data)} nodes")
     return precomputed_data
 
 
-# 修改主执行代码，添加GPU检测
+# 修改主执行代码，移除cuGraph相关逻辑简化实现
 if __name__ == "__main__":
-    # 检查GPU是否可用并打印状态信息
-    if CUGRAPH_AVAILABLE:
-        print("Using cuGraph acceleration on GPU")
-    else:
-        print("GPU acceleration not available, using CPU implementation")
+    print("Using PyG implementation for graph processing")
     
-    # For BAHouse dataset, use smaller batch sizes and fewer workers
+    # 加载测试节点
     center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
-    max_subgraph_size = 200  # Skip nodes with too many neighbors
-    num_workers = 8  # Reduce number of parallel processes 
-    batch_size = 50  # Smaller batch size for lower memory usage
+    max_subgraph_size = 200  # 跳过邻居太多的节点
+    num_workers = 8  # 减少并行进程数量提高稳定性
+    batch_size = 50  # 较小的批次大小以减少内存使用
     save_dir = './precomputed/{}'.format(data_name)
 
     precompute_in_batches(data, center_nodes, L, 
@@ -377,6 +225,7 @@ if __name__ == "__main__":
                         save_dir=save_dir,
                         max_subgraph_size=max_subgraph_size)
 
-    # Example usage for loading
-    # precomputed_data = load_precomputed(save_dir, batch_size=5)
-    # print(f"Loaded data for {len(precomputed_data)} nodes")
+    # 验证加载过程
+    print("Verifying data loading...")
+    sample_data = load_precomputed(save_dir, batch_size=5)
+    print(f"Verification complete: loaded {len(sample_data)} nodes")

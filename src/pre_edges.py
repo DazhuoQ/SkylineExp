@@ -1,6 +1,15 @@
-from src.utils import *
+from utils import *
+import os
 
-config = load_config("config.yaml")
+# 确保正确找到配置文件 - 支持从src目录或项目根目录运行
+config_path = "config.yaml"
+if not os.path.exists(config_path):
+    config_path = "../config.yaml"
+    
+if not os.path.exists(config_path):
+    raise FileNotFoundError("找不到config.yaml文件，请确保它在当前目录或上一级目录中")
+    
+config = load_config(config_path)
 data_name = config['data_name']
 random_seed = config['random_seed']
 L = config['L']
@@ -11,6 +20,7 @@ import torch
 import torch.cuda
 import torch_geometric
 import os
+import sys
 import multiprocessing
 import gc
 import numpy as np
@@ -39,15 +49,44 @@ from functools import lru_cache
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"使用设备: {DEVICE}")
 
-# 硬件资源检测
-NUM_CPUS = os.cpu_count()
-CPU_MEMORY = psutil.virtual_memory().total / (1024 ** 3)  # GB
+# 硬件资源检测 - 增强健壮性
+NUM_CPUS = os.cpu_count() or 4  # 默认为4核心
+CPU_MEMORY = 0
+
+# 安全获取系统内存
+try:
+    if hasattr(psutil, 'virtual_memory'):
+        CPU_MEMORY = psutil.virtual_memory().total / (1024 ** 3)  # GB
+    elif sys.platform == 'darwin':  # macOS
+        import subprocess
+        result = subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True)
+        if result.returncode == 0:
+            CPU_MEMORY = int(result.stdout) / (1024 ** 3)
+    elif sys.platform == 'linux':  # Linux
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if 'MemTotal' in line:
+                    CPU_MEMORY = int(line.split()[1]) / (1024 ** 2)  # KB to GB
+                    break
+except Exception as e:
+    print(f"警告: 无法获取系统内存信息: {str(e)}")
+    CPU_MEMORY = 8  # 假设8GB内存
+
+# 安全获取GPU内存
 GPU_MEMORY = 0
 if torch.cuda.is_available():
-    GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # GB
-    
-print(f"系统资源: {NUM_CPUS} CPU核心, {CPU_MEMORY:.1f}GB CPU内存", 
-      f"{GPU_MEMORY:.1f}GB GPU内存" if GPU_MEMORY > 0 else "")
+    try:
+        GPU_MEMORY = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)  # GB
+    except Exception as e:
+        print(f"警告: 无法获取GPU内存信息: {str(e)}")
+
+# 打印系统资源信息
+print(f"系统资源: {NUM_CPUS} CPU核心", end="")
+if CPU_MEMORY > 0:
+    print(f", {CPU_MEMORY:.1f}GB CPU内存", end="")
+if GPU_MEMORY > 0:
+    print(f", {GPU_MEMORY:.1f}GB GPU内存", end="")
+print()
 
 # Set multiprocessing method early (important for MacOS/Linux)
 try:
@@ -63,11 +102,9 @@ counter_lock = multiprocessing.Lock()
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"使用设备: {DEVICE}")
 
-# 硬件资源检测
+# 硬件资源检测 - 避免重复检测内存
 NUM_CPUS = os.cpu_count()
-CPU_MEMORY = 0
-if psutil:
-    CPU_MEMORY = psutil.virtual_memory().total / (1024 ** 3)  # GB
+# 不再重复检测CPU内存，使用前面已经检测到的值
     
 GPU_MEMORY = 0
 if torch.cuda.is_available():
@@ -531,7 +568,19 @@ def precompute_single_node(args):
 def estimate_optimal_batch_size(node_degrees, max_memory_gb=16):
     """根据节点度数分布智能估算最佳批次大小"""
     # 根据系统内存自动调整
-    system_memory_gb = psutil.virtual_memory().total / (1024**3)
+    system_memory_gb = max_memory_gb  # 默认值
+    
+    # 尝试获取实际系统内存
+    try:
+        system_memory_gb = max_memory_gb  # 默认值
+        if CPU_MEMORY > 0:  # 使用全局已检测到的内存
+            system_memory_gb = CPU_MEMORY
+        elif hasattr(psutil, 'virtual_memory') and psutil is not None:
+            system_memory_gb = psutil.virtual_memory().total / (1024**3)
+    except Exception:
+        pass  # 使用默认内存估计
+        
+    # 安全系数 - 只使用70%的可用内存
     max_memory_gb = min(max_memory_gb, system_memory_gb * 0.7)
     
     # 计算平均节点度数和标准差
@@ -643,10 +692,12 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100,
             node_degrees.append(0)
             
     # 智能批次大小计算
-    if hasattr(psutil, 'virtual_memory'):  # 确保psutil可用
+    try:
         estimated_batch_size = estimate_optimal_batch_size(node_degrees, max_memory_gb=16)
         print(f"自适应批次大小: {estimated_batch_size} (原始: {batch_size})")
         batch_size = estimated_batch_size
+    except Exception as e:
+        print(f"使用默认批次大小: {batch_size}, 原因: {str(e)}")
     
     # 创建更智能的批次 - 将相似度数的节点分到一起
     nodes_by_degree = defaultdict(list)
@@ -765,9 +816,13 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100,
             print(f"已处理 {total_processed}/{total_nodes} 个节点 ({total_processed/total_nodes*100:.1f}%)")
             
             # 报告内存使用情况
-            process = psutil.Process(os.getpid())
-            memory_info = process.memory_info()
-            print(f"内存使用: {memory_info.rss/1024**3:.2f}GB")
+            try:
+                if hasattr(psutil, 'Process'):
+                    process = psutil.Process(os.getpid())
+                    memory_info = process.memory_info()
+                    print(f"内存使用: {memory_info.rss/1024**3:.2f}GB")
+            except Exception:
+                pass  # 如果无法获取内存信息，则跳过报告
     
     # 最终保存失败的节点列表
     with open(failed_nodes_file, 'w') as f:
@@ -882,8 +937,13 @@ def load_precomputed(save_dir='precomputed/', batch_size=10, lazy_loading=False)
     # 标准加载实现
     precomputed_data = {}
     memory_usage_start = 0
-    if hasattr(psutil, 'Process'):
-        memory_usage_start = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    
+    # 尝试获取初始内存使用
+    try:
+        if hasattr(psutil, 'Process'):
+            memory_usage_start = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+    except Exception:
+        pass  # 如果获取内存信息失败，忽略
     
     for i in range(0, len(all_files), batch_size):
         batch_files = all_files[i:i+batch_size]
@@ -927,7 +987,27 @@ if __name__ == "__main__":
     
     # 系统资源检测
     num_cpus = os.cpu_count()
-    memory_gb = psutil.virtual_memory().total / (1024 ** 3)
+    
+    # 获取内存信息，使用安全的方式
+    memory_gb = 8.0  # 默认值
+    try:
+        if CPU_MEMORY > 0:
+            memory_gb = CPU_MEMORY
+        elif hasattr(psutil, 'virtual_memory') and psutil is not None:
+            memory_gb = psutil.virtual_memory().total / (1024 ** 3)
+        elif sys.platform == 'darwin':  # macOS
+            import subprocess
+            result = subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True)
+            if result.returncode == 0:
+                memory_gb = int(result.stdout.strip()) / (1024 ** 3)
+        elif sys.platform == 'linux':  # Linux
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if 'MemTotal' in line:
+                        memory_gb = int(line.split()[1]) / (1024 ** 2)  # KB to GB
+                        break
+    except Exception as e:
+        print(f"警告: 内存检测失败: {str(e)}, 使用默认值")
     
     # GPU检测
     gpu_available = torch.cuda.is_available()

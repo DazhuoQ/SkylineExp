@@ -1,4 +1,4 @@
-from src.utils import *
+from utils import *
 import os
 import torch
 import networkx as nx
@@ -7,7 +7,14 @@ import random
 from tqdm import tqdm
 from collections import deque
 
-config = load_config("config.yaml")
+config_path = "config.yaml"
+if not os.path.exists(config_path):
+    config_path = "../config.yaml"
+    
+if not os.path.exists(config_path):
+    raise FileNotFoundError("找不到config.yaml文件，请确保它在当前目录或上一级目录中")
+
+config = load_config(config_path)
 data_name = config['data_name']
 random_seed = config['random_seed']
 L = config['L']

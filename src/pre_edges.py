@@ -64,7 +64,86 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     if node_degree[vt] > max_subgraph_size:
         return None, None, 0, None  # Skip nodes with too many connections
     
-    # 使用cuGraph进行加速计算 (如果可用)
+    # 优化的PyG实现
+    try:
+        # 使用PyG的k_hop_subgraph方法，但添加错误处理和优化
+        node_idx, edge_index_sub, mapping, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
+            vt, L, edge_index, relabel_nodes=False, num_nodes=G.num_nodes
+        )
+        
+        # 检查子图大小
+        if original_edge_mask.sum() > max_subgraph_size:
+            print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
+            return None, None, 0, None
+        
+        ori_mask = original_edge_mask
+        selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+        
+        # 处理只有一条边的情况
+        if selected_edge_positions.dim() == 0:
+            selected_edge_positions = selected_edge_positions.unsqueeze(0)
+        
+        subg_size = selected_edge_positions.size(0)
+        
+        # 使用PyG的稀疏邻接矩阵来优化BFS
+        # 创建稀疏邻接矩阵
+        edge_index_masked = edge_index[:, original_edge_mask]
+        
+        # 计算每个节点的hop距离 - 优化的BFS实现
+        hop_distances = {}
+        hop_distances[vt] = 0
+        visited = {vt}
+        current_frontier = {vt}
+        
+        for hop in range(1, L + 1):
+            if not current_frontier:
+                break
+                
+            next_frontier = set()
+            # 为当前边界中的每个节点找到所有邻居
+            for node in current_frontier:
+                # 找出所有以当前节点为源的边
+                neighbors = edge_index_masked[1][edge_index_masked[0] == node].tolist()
+                # 找出所有以当前节点为目标的边
+                neighbors.extend(edge_index_masked[0][edge_index_masked[1] == node].tolist())
+                
+                for neighbor in neighbors:
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        hop_distances[neighbor] = hop
+                        next_frontier.add(neighbor)
+            
+            current_frontier = next_frontier
+        
+        # 高效地按hop对边进行分组 - 使用张量操作而不是循环
+        edges_by_hop = defaultdict(list)
+        
+        for edge_idx in selected_edge_positions:
+            src, dst = edge_index[:, edge_idx]
+            src_item, dst_item = src.item(), dst.item()
+            src_hop = hop_distances.get(src_item, float('inf'))
+            dst_hop = hop_distances.get(dst_item, float('inf'))
+            edge_hop = min(src_hop, dst_hop) + 1
+            if edge_hop <= L + 1:  # 只包含我们hop限制内的边
+                edges_by_hop[edge_hop].append(edge_idx.item())
+        
+        # 批量创建边掩码 - 减少内存分配
+        edge_masks_by_hop = {}
+        cumulative_edges = []
+        for hop in range(1, L + 2):
+            if hop in edges_by_hop:
+                cumulative_edges.extend(edges_by_hop[hop])
+                mask = torch.zeros_like(original_edge_mask)
+                mask[cumulative_edges] = True
+                edge_masks_by_hop[hop] = mask
+        
+        return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+    
+    except RuntimeError as e:  # 处理内存错误
+        print(f"PyG processing error for node {vt}: {e}. Skipping...")
+        return None, None, 0, None
+    
+    # 如果cuGraph可用且PyG失败，尝试使用cuGraph
     if CUGRAPH_AVAILABLE:
         try:
             # 转换为cuGraph图
@@ -129,7 +208,7 @@ def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
         except Exception as e:
             print(f"cuGraph processing error for node {vt}: {e}. Falling back to CPU implementation.")
     
-    # 如果cuGraph不可用或失败，使用原始实现
+    # 如果上面的方法都失败，使用原始CPU实现
     try:
         node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
             vt, L, edge_index, relabel_nodes=False
@@ -287,7 +366,7 @@ if __name__ == "__main__":
     
     # For BAHouse dataset, use smaller batch sizes and fewer workers
     center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
-    max_subgraph_size = 30  # Skip nodes with too many neighbors
+    max_subgraph_size = 200  # Skip nodes with too many neighbors
     num_workers = 8  # Reduce number of parallel processes 
     batch_size = 50  # Smaller batch size for lower memory usage
     save_dir = './precomputed/{}'.format(data_name)

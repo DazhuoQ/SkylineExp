@@ -1,4 +1,11 @@
-from utils import *
+# 自适应导入utils模块
+try:
+    from utils import *  # 当在src目录内运行时
+except ImportError:
+    try:
+        from src.utils import *  # 当在项目根目录运行时
+    except ImportError:
+        raise ImportError("无法导入utils模块，请确保在正确的目录中运行脚本")
 import os
 import torch
 import networkx as nx

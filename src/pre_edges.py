@@ -21,80 +21,90 @@ multiprocessing.set_start_method('fork', force=True)
 def get_edge_sets_by_hop(vt, G, L, max_subgraph_size=50000):
     edge_index = G.edge_index
     
-    # Get node degree for early stopping if the node is too large
+    # 快速检查节点度数 - 用于提前终止
     node_degree = torch_geometric.utils.degree(edge_index[0], num_nodes=G.num_nodes)
     if node_degree[vt] > max_subgraph_size:
-        return None, None, 0, None  # Skip nodes with too many connections
+        return None, None, 0, None  # 跳过连接过多的节点
     
-    # 使用纯PyG实现，移除复杂的cuGraph逻辑以提高稳定性
     try:
-        # 使用PyG的k_hop_subgraph方法获取子图
+        # 优化: 直接使用PyG的k_hop_subgraph但设置更严格的内存限制
+        start_time = time.time()
         node_idx, edge_index_sub, _, original_edge_mask = torch_geometric.utils.k_hop_subgraph(
             vt, L, edge_index, relabel_nodes=False, num_nodes=G.num_nodes
         )
         
-        # 检查子图大小
+        # 子图太大则跳过
         if original_edge_mask.sum() > max_subgraph_size:
-            print(f"Subgraph for node {vt} too large: {original_edge_mask.sum()} edges. Skipping...")
             return None, None, 0, None
         
         ori_mask = original_edge_mask
-        selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
-        
-        # 处理只有一条边的情况
-        if selected_edge_positions.dim() == 0:
-            selected_edge_positions = selected_edge_positions.unsqueeze(0)
-        
+        selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=True)[0]  # 更快的实现
         subg_size = selected_edge_positions.size(0)
         
-        # 构建邻接表用于快速BFS
-        adj_list = defaultdict(set)
-        for edge_idx in selected_edge_positions:
-            src, dst = edge_index[:, edge_idx]
-            src_item, dst_item = src.item(), dst.item()
-            adj_list[src_item].add(dst_item)
-            adj_list[dst_item].add(src_item)
+        # 优化: 使用稀疏矩阵加速BFS
+        row, col = edge_index[:, original_edge_mask]
         
-        # 使用BFS计算hop距离
-        hop_distances = {}
-        hop_distances[vt] = 0
+        # 更高效的邻接表构建
+        adj_list = defaultdict(list)
+        for i in range(len(row)):
+            src, dst = row[i].item(), col[i].item()
+            adj_list[src].append(dst)
+            adj_list[dst].append(src)
+        
+        # 快速BFS
+        hop_distances = {vt: 0}
         queue = deque([vt])
-        visited = {vt}
         
         while queue:
-            current_node = queue.popleft()
-            current_hop = hop_distances[current_node]
+            node = queue.popleft()
+            current_hop = hop_distances[node]
             
-            for neighbor in adj_list[current_node]:
-                if neighbor not in visited:
-                    visited.add(neighbor)
+            if current_hop >= L:  # 达到最大跳数时停止
+                continue
+                
+            for neighbor in adj_list[node]:
+                if neighbor not in hop_distances:
                     hop_distances[neighbor] = current_hop + 1
-                    if current_hop + 1 < L:  # 只在需要时继续BFS
-                        queue.append(neighbor)
+                    queue.append(neighbor)
         
-        # 按hop对边进行分组
+        # 优化: 批量分配边到hops
         edges_by_hop = defaultdict(list)
-        for edge_idx in selected_edge_positions:
-            src, dst = edge_index[:, edge_idx]
-            src_item, dst_item = src.item(), dst.item()
-            src_hop = hop_distances.get(src_item, float('inf'))
-            dst_hop = hop_distances.get(dst_item, float('inf'))
-            edge_hop = min(src_hop, dst_hop) + 1
-            if edge_hop <= L + 1:
-                edges_by_hop[edge_hop].append(edge_idx.item())
         
-        # 创建边掩码
+        for i in range(len(selected_edge_positions)):
+            edge_idx = selected_edge_positions[i].item()
+            src, dst = edge_index[:, edge_idx]
+            src_hop = hop_distances.get(src.item(), float('inf'))
+            dst_hop = hop_distances.get(dst.item(), float('inf'))
+            min_hop = min(src_hop, dst_hop)
+            
+            if min_hop < float('inf'):
+                edge_hop = min_hop + 1
+                if edge_hop <= L + 1:
+                    edges_by_hop[edge_hop].append(edge_idx)
+        
+        # 优化: 创建边掩码的高效实现
         edge_masks_by_hop = {}
-        cumulative_edges = []
         for hop in range(1, L + 2):
-            if hop in edges_by_hop:
-                cumulative_edges.extend(edges_by_hop[hop])
-                mask = torch.zeros_like(original_edge_mask)
-                mask[cumulative_edges] = True
-                edge_masks_by_hop[hop] = mask
+            if hop not in edges_by_hop:
+                continue
+                
+            # 收集当前hop及以下的所有边
+            all_edges = []
+            for h in range(1, hop + 1):
+                if h in edges_by_hop:
+                    all_edges.extend(edges_by_hop[h])
+            
+            # 创建掩码 (向量化操作)
+            mask = torch.zeros_like(original_edge_mask)
+            if all_edges:  # 只在有边时设置掩码
+                mask[all_edges] = True
+            edge_masks_by_hop[hop] = mask
+        
+        # 清理以节省内存
+        del adj_list, hop_distances
         
         return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
-    
+        
     except Exception as e:
         print(f"Error processing node {vt}: {str(e)}")
         return None, None, 0, None
@@ -122,34 +132,52 @@ def precompute_single_node(args):
         return vt, None
 
 
-# 改进的批量预计算和保存函数
-def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50, 
+# 优化的多线程处理（使用更大的批次大小和更少的工作进程）
+def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=100, 
                          save_dir='precomputed/', max_subgraph_size=5000):
+    import time
     os.makedirs(save_dir, exist_ok=True)
     
     # 记录失败的节点
     failed_nodes_file = os.path.join(save_dir, "failed_nodes.txt")
     failed_nodes = []
     
-    # 过滤掉度数太大的节点
+    # 过滤掉度数太大的节点 - 更快的过滤
+    print("Filtering nodes by degree...")
     if hasattr(G, 'num_nodes'):
         degree = torch_geometric.utils.degree(G.edge_index[0], num_nodes=G.num_nodes)
-        filtered_nodes = [node for node in list_of_nodes if degree[node] <= max_subgraph_size]
-        skipped_nodes = set(list_of_nodes) - set(filtered_nodes)
-        failed_nodes.extend(skipped_nodes)
+        filtered_nodes = []
+        for node in tqdm(list_of_nodes, desc="Checking node degrees"):
+            if node < len(degree) and degree[node] <= max_subgraph_size:
+                filtered_nodes.append(node)
+            else:
+                failed_nodes.append(node)
+        
         print(f"Filtered out {len(list_of_nodes) - len(filtered_nodes)} nodes with degree > {max_subgraph_size}")
         list_of_nodes = filtered_nodes
     
+    # 创建更大的批次以减少开销
     batches = [list_of_nodes[i:i+batch_size] for i in range(0, len(list_of_nodes), batch_size)]
+    print(f"Processing {len(batches)} batches with {batch_size} nodes each")
+    
+    total_start_time = time.time()
     
     for batch_idx, batch_nodes in enumerate(tqdm(batches, desc="Precomputing batches")):
+        batch_start_time = time.time()
         batch_results = {}
         args = [(vt, G, L, max_subgraph_size) for vt in batch_nodes]
         
         # 使用进程池处理批次
         with multiprocessing.Pool(num_workers) as pool:
-            for vt, result in pool.map(precompute_single_node, args):
-                if result is not None:  # 跳过失败的节点
+            results = list(tqdm(
+                pool.imap(precompute_single_node, args),
+                total=len(args),
+                desc=f"Batch {batch_idx+1}/{len(batches)}",
+                leave=False
+            ))
+            
+            for vt, result in results:
+                if result is not None:
                     batch_results[vt] = result
                 else:
                     failed_nodes.append(vt)
@@ -159,21 +187,31 @@ def precompute_in_batches(G, list_of_nodes, L, num_workers=4, batch_size=50,
             save_path = os.path.join(save_dir, f'batch_{batch_idx}.pt')
             try:
                 torch.save(batch_results, save_path)
-                print(f"Saved batch {batch_idx} with {len(batch_results)} nodes")
+                batch_time = time.time() - batch_start_time
+                print(f"Saved batch {batch_idx} with {len(batch_results)} nodes in {batch_time:.2f}s")
             except Exception as e:
                 print(f"Error saving batch {batch_idx}: {str(e)}")
                 # 记录整个批次的失败节点
                 failed_nodes.extend(batch_nodes)
         
         # 清理内存
-        del batch_results
+        del batch_results, results
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        # 每10个批次保存一次进度
+        if (batch_idx + 1) % 10 == 0:
+            # 保存失败的节点列表
+            with open(failed_nodes_file, 'w') as f:
+                for node in failed_nodes:
+                    f.write(f"{node}\n")
+            print(f"Progress: {batch_idx+1}/{len(batches)} batches, time elapsed: {time.time()-total_start_time:.2f}s")
     
-    # 保存失败的节点列表
+    # 最终保存失败的节点列表
     with open(failed_nodes_file, 'w') as f:
         for node in failed_nodes:
             f.write(f"{node}\n")
     print(f"Saved list of {len(failed_nodes)} failed nodes to {failed_nodes_file}")
+    print(f"Total time: {time.time()-total_start_time:.2f}s")
 
 
 # 增强的加载函数，支持容错
@@ -210,20 +248,32 @@ def load_precomputed(save_dir='precomputed/', batch_size=10):
 
 # 修改主执行代码，移除cuGraph相关逻辑简化实现
 if __name__ == "__main__":
-    print("Using PyG implementation for graph processing")
+    import time
+    print("Using optimized PyG implementation for graph processing")
     
     # 加载测试节点
     center_nodes = torch.load('./datasets/{}/test_nodes.pt'.format(data_name))
-    max_subgraph_size = 200  # 跳过邻居太多的节点
-    num_workers = 8  # 减少并行进程数量提高稳定性
-    batch_size = 50  # 较小的批次大小以减少内存使用
+    print(f"Loaded {len(center_nodes)} center nodes")
+    
+    # 优化参数
+    max_subgraph_size = 500  # 增加阈值以处理更多节点
+    num_workers = max(4, os.cpu_count() // 2)  # 使用一半的CPU核心
+    batch_size = 200  # 更大的批次减少开销
     save_dir = './precomputed/{}'.format(data_name)
+    
+    print(f"Starting precomputation with parameters:")
+    print(f"- Max subgraph size: {max_subgraph_size}")
+    print(f"- Workers: {num_workers}")
+    print(f"- Batch size: {batch_size}")
+    print(f"- Save directory: {save_dir}")
 
+    start_time = time.time()
     precompute_in_batches(data, center_nodes, L, 
                         num_workers=num_workers, 
                         batch_size=batch_size, 
                         save_dir=save_dir,
                         max_subgraph_size=max_subgraph_size)
+    print(f"Precomputation completed in {time.time()-start_time:.2f} seconds")
 
     # 验证加载过程
     print("Verifying data loading...")

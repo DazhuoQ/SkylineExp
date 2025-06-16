@@ -222,7 +222,7 @@ class ShareApxSXOP:
     def IPF(self):
         for vt, k_sky in self.k_sky_lst:
             _, _, _, original_edge_mask = k_hop_subgraph(vt, self.L, self.G.edge_index, relabel_nodes=False)
-            selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
+            selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).view(-1)
             subg_size = selected_edge_positions.size(0)
             score_lst = []
             for mask in k_sky:

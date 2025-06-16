@@ -74,31 +74,37 @@ def get_edge_sets_by_hop(vt, G, L):
     edge_index = G.edge_index
     total_edges = edge_index.size(1)
 
-    # Initialize edge mask for each hop level
+    # Get L-hop subgraph once
+    _, _, _, ori_mask = torch_geometric.utils.k_hop_subgraph(
+        vt, L, edge_index, relabel_nodes=False
+    )
+    selected_edge_positions = torch.nonzero(ori_mask, as_tuple=False).squeeze()
+    subg_size = selected_edge_positions.numel()
+
+    # Prepare masks and hop groupings
     edge_masks_by_hop = {}
     edges_by_hop = defaultdict(list)
-    visited_edges = torch.zeros(total_edges, dtype=torch.bool)
+    visited = torch.zeros(total_edges, dtype=torch.bool)
 
     for hop in range(1, L + 2):
-        # Get hop-level subgraph
-        _, edge_index_hop, _, edge_mask_hop = torch_geometric.utils.k_hop_subgraph(
-            vt, L, edge_index, relabel_nodes=False
+        _, _, _, hop_mask = torch_geometric.utils.k_hop_subgraph(
+            vt, hop, edge_index, relabel_nodes=False
         )
 
-        # Mask only edges that haven't been seen in previous hops
-        new_edge_mask = edge_mask_hop & (~visited_edges)
-        visited_edges |= new_edge_mask
+        # Filter out previously visited edges
+        new_edges = hop_mask & (~visited)
+        visited |= new_edges
 
-        edge_indices = torch.nonzero(new_edge_mask, as_tuple=False).squeeze().tolist()
-        if isinstance(edge_indices, int):  # special case: only one edge
-            edge_indices = [edge_indices]
+        edge_indices = torch.nonzero(new_edges, as_tuple=False).squeeze()
+        if edge_indices.ndim == 0:
+            edge_indices = edge_indices.unsqueeze(0)
 
-        # Store
-        edge_masks_by_hop[hop] = new_edge_mask.clone()
-        edges_by_hop[hop] = edge_indices
+        # Store by hop
+        edge_masks_by_hop[hop] = new_edges.clone()
+        edges_by_hop[hop] = edge_indices.tolist()
 
-    subg_size = visited_edges.sum().item()
-    return edges_by_hop, edge_masks_by_hop, subg_size, visited_edges
+    return edges_by_hop, edge_masks_by_hop, subg_size, ori_mask
+
 
 # Wrapper for a single node (for multiprocessing)
 def precompute_single_node(args):

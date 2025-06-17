@@ -4,6 +4,7 @@ config = load_config("config.yaml")
 data_name = config['data_name']
 random_seed = config['random_seed']
 L = config['L']
+VT = config['VT']
 set_seed(random_seed)
 data = dataset_func(config)
 
@@ -190,17 +191,22 @@ m = 8
 group_size = 30
 random_flag = True
 nodes_selected = []
+alg = 'seq' # para
 
-if random_flag == True:
-    nodes_selected = get_random_nodes(data, m*group_size)
+
+if alg == 'seq':
+    nodes_selected = VT
 else:
+    if random_flag == True:
+        nodes_selected = get_random_nodes(data, m*group_size)
+    else:
 
-    groups = cluster_by_bfs_exact(data, m=m, group_size=group_size, min_hop_distance=10, l=L, max_lhop_size=200)
+        groups = cluster_by_bfs_exact(data, m=m, group_size=group_size, min_hop_distance=10, l=L, max_lhop_size=200)
 
 
-    for i, (seed, nodes) in enumerate(groups.items()):
-        clean_nodes = [int(i) for i in nodes]
-        nodes_selected.extend(clean_nodes)
+        for i, (seed, nodes) in enumerate(groups.items()):
+            clean_nodes = [int(i) for i in nodes]
+            nodes_selected.extend(clean_nodes)
     # print(f"Group {i}: seed {seed}, {len(nodes)} nodes")
 # print(nodes_selected)
 

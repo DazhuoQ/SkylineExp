@@ -1,4 +1,4 @@
-# SkylineExp
+# Skyline Explanation
 
 This is the repo for the paper "Generating Skyline Explanations for Graph Neural Networks".
 

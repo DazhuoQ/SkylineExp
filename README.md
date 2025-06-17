@@ -1,6 +1,6 @@
 # Skyline Explanation
 
-This is the repo for the paper "Generating Skyline Explanations for Graph Neural Networks".
+This is the repo for the paper "Interpreting Graph Inference with Skyline Explanations".
 
 ## 1. Prepare the environment
 

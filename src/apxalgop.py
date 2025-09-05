@@ -185,18 +185,15 @@ class ApxSXOP:
         device = next(self.model.parameters()).device
         
         for vt, k_sky in self.k_sky_lst:
-            # 确保vt是张量并在正确设备上
-            vt_tensor = vt if isinstance(vt, torch.Tensor) else torch.tensor(vt)
-            vt_tensor = vt_tensor.to(device)
             
-            _, _, _, original_edge_mask = k_hop_subgraph(vt_tensor, self.L, self.G.edge_index, relabel_nodes=False)
+            _, _, _, original_edge_mask = k_hop_subgraph(vt, self.L, self.G.edge_index, relabel_nodes=False)
             original_edge_mask = original_edge_mask.to(device)
             selected_edge_positions = torch.nonzero(original_edge_mask, as_tuple=False).squeeze()
             subg_size = selected_edge_positions.size(0)
             score_lst = []
             for mask in k_sky:
                 mask = mask.to(device)
-                fidelity_plus, fidelity_minus, _, _ = self.compute_fidelity(vt_tensor, mask, original_edge_mask)
+                fidelity_plus, fidelity_minus, _, _ = self.compute_fidelity(vt, mask, original_edge_mask)
                 conc = 1 - (math.log(mask.sum().item()) / math.log(subg_size))
                 tmp = (fidelity_plus + fidelity_minus + conc)/3
                 score_lst.append(tmp)

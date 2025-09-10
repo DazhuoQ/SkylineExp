@@ -7,7 +7,7 @@ import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid, FacebookPagePage, AmazonProducts, Amazon
 from ogb.nodeproppred import PygNodePropPredDataset
 from torch_geometric.datasets import ExplainerDataset
-from torch_geometric.datasets.graph_generator import BAGraph
+from torch_geometric.datasets.graph_generator import BAGraph, TreeGraph
 from torch_geometric.utils import remove_self_loops
 
 
@@ -150,7 +150,63 @@ def dataset_func(config):
 
         print(data)
         return data
-    
+
+
+    if data_name in ["ba", "tree"]:
+        # BA-Shapes with ground-truth explanations via ExplainerDataset
+        if data_name == "ba":
+            dataset = ExplainerDataset(
+                graph_generator=BAGraph(num_nodes=300, num_edges=5),
+                motif_generator='house',
+                num_motifs=80,
+            )
+        elif data_name == "tree":
+            dataset = ExplainerDataset(
+                graph_generator=TreeGraph(depth=8, undirected=True),
+                motif_generator='cycle',
+                num_motifs=80,
+                motif_generator_kwargs={'num_nodes':6}
+            )
+        data = dataset[0]  # single synthetic graph
+
+        if getattr(data, "x", None) is None:
+            data.x = torch.ones((data.num_nodes, 1), dtype=torch.float)
+
+        # Optional: match your other loaders (remove self-loops)
+        if hasattr(data, "edge_index"):
+            data.edge_index, _ = remove_self_loops(data.edge_index)
+
+        # Ensure labels are 1D
+        if hasattr(data, "y") and data.y.dim() > 1:
+            data.y = data.y.view(-1)
+
+        num_nodes = data.num_nodes
+
+        # Fresh masks: 60/20/(config['num_test']) split like your other branches
+        train_mask = torch.zeros(num_nodes, dtype=torch.bool)
+        val_mask   = torch.zeros(num_nodes, dtype=torch.bool)
+        test_mask  = torch.zeros(num_nodes, dtype=torch.bool)
+
+        num_train = int(0.6 * num_nodes)
+        num_val   = num_nodes - num_train - num_test
+
+        train_mask[:num_train] = True
+        val_mask[num_train:num_train + num_val] = True
+        test_mask[num_train + num_val:] = True
+
+        data.train_mask = train_mask
+        data.val_mask   = val_mask
+        data.test_mask  = test_mask
+
+        print(data)
+        # print(data.y)
+        # print(data.x)
+        
+        os.makedirs("./datasets/{}".format(data_name), exist_ok=True)
+        torch.save(data, "./datasets/{}/data.pt".format(data_name))
+
+        return data
+
 
     num_train_per_class = (data_size - num_test)//num_class
     data = Planetoid(root=data_dir, name=data_name, split='random', num_train_per_class=num_train_per_class, num_val=0, num_test=num_test)[0]

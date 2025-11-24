@@ -1,6 +1,6 @@
 # Skyline Explanation
 
-This is the repo for the paper "Interpreting Graph Inference with Skyline Explanations".
+This is the repo for the ICDE 2026 paper "Interpreting Graph Inference with Skyline Explanations" -- Dazhuo Qiu, Haolai Che, Arijit Khan, Yinghui Wu. 
 
 ## 1. Prepare the environment
 
